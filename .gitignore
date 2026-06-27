@@ -1,0 +1,6 @@
+.venv/
+build/
+.claude/
+slprj/
+*.slx.autosave
+__pycache__/

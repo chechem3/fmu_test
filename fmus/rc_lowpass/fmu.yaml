@@ -1,0 +1,28 @@
+fmi:
+  version: '2.0'
+  kind: CoSimulation
+  modelIdentifier: rc_lowpass
+  guid: aafcfb5e-a358-4151-be39-89dfc7503169
+  generationTool: fmu-pack 0.1.0
+variables:
+- name: tau
+  vr: 1
+  type: Real
+  causality: parameter
+  start: 1.0
+  variability: fixed
+- name: u
+  vr: 2
+  type: Real
+  causality: input
+- name: y
+  vr: 3
+  type: Real
+  causality: output
+model:
+  step: euler
+  state_type: RcState
+  sources:
+  - src/user_model.c
+platforms:
+- win64
