@@ -1,24 +1,21 @@
-/**
- * fmi2_adapter.c —— FMI 2.0 Co-Simulation 适配层（ZeroMQ 订阅 FMU）
+/* ============================================================
+ * fmi2_adapter.c —— 由 fmu-pack 自动生成，勿手动编辑
+ * 模型:     zmqsub
+ * 状态类型: ZmqSubState
+ * 回调前缀: zmqsub
  *
- * 职责:
- *   1. 导出 fmi2* 符号（C 链接）
- *   2. 管理 FMI 状态机: instantiated → initMode → stepMode → terminated
- *   3. 通过 fmi2_router.h 的路由表分发 get/setReal
- *   4. doStep 调用用户模型的 zmqsub_step 回调（含 ZMQ 轮询）
- *
- * 与 rc_lowpass 适配层的唯一差异: 状态类型为 ZmqSubState
- */
+ * 改 fmu.yaml 后运行 fmu-pack build 重新生成此文件
+ * ============================================================ */
 
 #include "fmi2Functions.h"
 #include "fmi2_router.h"
 #include "user_model.h"
 
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
 
-/* ---- 适配层内部状态 ---- */
+/* ---- 适配层内部状态机 ---- */
 typedef enum {
     STATE_INSTANTIATED,
     STATE_INIT_MODE,
@@ -27,13 +24,13 @@ typedef enum {
 } FmuState;
 
 typedef struct {
-    ZmqSubState model;         /* 用户模型实例（含 ZMQ 资源） */
-    FmuState state;            /* FMI 状态机当前状态 */
-    fmi2Real t_start;          /* 仿真起始时间 */
-    fmi2Real t_current;        /* 当前通信点时间 */
-    fmi2String instance_name;  /* 实例名 */
+    ZmqSubState model;             /* 用户模型状态 */
+    FmuState state;                  /* FMI 状态机 */
+    fmi2Real t_start;                /* 仿真起始时间 */
+    fmi2Real t_current;              /* 当前通信点时间 */
+    fmi2String instance_name;        /* 实例名 */
     fmi2CallbackFunctions callbacks; /* importer 回调 */
-    fmi2Boolean logging_on;    /* 日志开关 */
+    fmi2Boolean logging_on;          /* 日志开关 */
 } ModelInstance;
 
 /* ---- 日志辅助 ---- */
@@ -46,7 +43,10 @@ static void log_msg(ModelInstance* inst, fmi2Status status,
     }
 }
 
-/* ---- FMI 2.0 公共函数声明 ---- */
+/* ================================================================
+ * FMI 2.0 公共函数声明（C 链接符号导出）
+ * ================================================================ */
+
 FMI2_Export fmi2GetTypesPlatformTYPE fmi2GetTypesPlatform;
 FMI2_Export fmi2GetVersionTYPE       fmi2GetVersion;
 FMI2_Export fmi2SetDebugLoggingTYPE  fmi2SetDebugLogging;
@@ -65,9 +65,9 @@ FMI2_Export fmi2SetRealTYPE          fmi2SetReal;
 FMI2_Export fmi2SetIntegerTYPE       fmi2SetInteger;
 FMI2_Export fmi2SetBooleanTYPE       fmi2SetBoolean;
 FMI2_Export fmi2SetStringTYPE        fmi2SetString;
-FMI2_Export fmi2GetFMUstateTYPE      fmi2GetFMUstate;
-FMI2_Export fmi2SetFMUstateTYPE      fmi2SetFMUstate;
-FMI2_Export fmi2FreeFMUstateTYPE     fmi2FreeFMUstate;
+FMI2_Export fmi2GetFMUstateTYPE            fmi2GetFMUstate;
+FMI2_Export fmi2SetFMUstateTYPE            fmi2SetFMUstate;
+FMI2_Export fmi2FreeFMUstateTYPE           fmi2FreeFMUstate;
 FMI2_Export fmi2SerializedFMUstateSizeTYPE fmi2SerializedFMUstateSize;
 FMI2_Export fmi2SerializeFMUstateTYPE      fmi2SerializeFMUstate;
 FMI2_Export fmi2DeSerializeFMUstateTYPE    fmi2DeSerializeFMUstate;
@@ -118,7 +118,7 @@ fmi2Component fmi2Instantiate(fmi2String instanceName, fmi2Type fmuType,
         if (functions && functions->logger) {
             functions->logger(functions->componentEnvironment,
                               instanceName, fmi2Error, "logStatusError",
-                              "只支持 Co-Simulation 模式");
+                              "仅支持 Co-Simulation 模式");
         }
         return NULL;
     }
@@ -134,10 +134,10 @@ fmi2Component fmi2Instantiate(fmi2String instanceName, fmi2Type fmuType,
         inst->callbacks = *functions;
     }
 
-    /* 初始化用户模型（含 ZeroMQ 连接） */
+    /* 调用用户模型 init 回调 */
     if (zmqsub_init(&inst->model) != 0) {
         log_msg(inst, fmi2Error, "logStatusError",
-                "fmi2Instantiate: ZMQ 初始化失败");
+                "fmi2Instantiate: 模型初始化失败");
         free(inst);
         return NULL;
     }
@@ -198,6 +198,7 @@ fmi2Status fmi2Terminate(fmi2Component c) {
 fmi2Status fmi2Reset(fmi2Component c) {
     ModelInstance* inst = (ModelInstance*)c;
     if (!inst) return fmi2Error;
+    /* 重置模型到初始状态 */
     zmqsub_terminate(&inst->model);
     zmqsub_init(&inst->model);
     inst->state = STATE_INSTANTIATED;
@@ -205,7 +206,7 @@ fmi2Status fmi2Reset(fmi2Component c) {
     return fmi2OK;
 }
 
-/* ---- get/set Real（通过路由表分发） ---- */
+/* ---- get/set Real: 通过路由表分发 ---- */
 
 fmi2Status fmi2GetReal(fmi2Component c, const fmi2ValueReference vr[],
                         size_t nvr, fmi2Real value[]) {
@@ -225,7 +226,7 @@ fmi2Status fmi2SetReal(fmi2Component c, const fmi2ValueReference vr[],
     return fmi2OK;
 }
 
-/* ---- 未实现的 get/set（返回 error） ---- */
+/* ---- 未实现的 get/set (返回 fmi2Error) ---- */
 
 fmi2Status fmi2GetInteger(fmi2Component c, const fmi2ValueReference vr[],
                            size_t nvr, fmi2Integer value[]) {
@@ -263,7 +264,7 @@ fmi2Status fmi2SetString(fmi2Component c, const fmi2ValueReference vr[],
     return fmi2Error;
 }
 
-/* ---- FMU state（未实现） ---- */
+/* ---- FMU state: 未实现 ---- */
 
 fmi2Status fmi2GetFMUstate(fmi2Component c, fmi2FMUstate* FMUstate) {
     (void)c; (void)FMUstate;
@@ -306,12 +307,14 @@ fmi2Status fmi2GetDirectionalDerivative(fmi2Component c,
                                          size_t nKnown,
                                          const fmi2Real dvKnown[],
                                          fmi2Real dvUnknown[]) {
-    (void)c; (void)vUnknown_ref; (void)nUnknown;
-    (void)vKnown_ref; (void)nKnown; (void)dvKnown; (void)dvUnknown;
+    (void)c;
+    (void)vUnknown_ref; (void)nUnknown;
+    (void)vKnown_ref; (void)nKnown;
+    (void)dvKnown; (void)dvUnknown;
     return fmi2Error;
 }
 
-/* ---- Co-Simulation 函数 ---- */
+/* ---- Co-Simulation ---- */
 
 fmi2Status fmi2SetRealInputDerivatives(fmi2Component c,
                                         const fmi2ValueReference vr[],
@@ -344,7 +347,7 @@ fmi2Status fmi2DoStep(fmi2Component c,
     }
     (void)noSetFMUStatePriorToCurrentPoint;
 
-    /* 调用用户模型 step（含 ZMQ 非阻塞轮询） */
+    /* 调用用户模型 step 回调 */
     int ret = zmqsub_step(&inst->model, currentCommunicationPoint, communicationStepSize);
     if (ret != 0) {
         log_msg(inst, fmi2Error, "logStatusError",

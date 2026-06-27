@@ -1,0 +1,74 @@
+"""rc_lowpass FMU 测试脚本
+
+使用 FMPy 加载并仿真生成的 FMU。
+
+前置条件:
+  pip install fmpy
+
+运行:
+  python test/my_fmu_test.py
+"""
+
+import os
+import sys
+
+# 检查 FMPy 是否安装
+try:
+    from fmpy import simulate_fmu
+except ImportError:
+    print("[错误] FMPy 未安装")
+    print("请运行: pip install fmpy")
+    sys.exit(1)
+
+
+def main():
+    # FMU 路径: ../dist/rc_lowpass.fmu
+    fmu_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..", "dist", "rc_lowpass.fmu"
+    )
+
+    if not os.path.exists(fmu_path):
+        print(f"[错误] 找不到 {fmu_path}")
+        print("请先运行 fmu-pack build 生成 FMU")
+        sys.exit(1)
+
+    print(f"=== rc_lowpass FMU 测试 ===\n")
+    print(f"FMU: {fmu_path}\n")
+
+    # ---- 仿真配置 ----
+    # TODO: 根据 fmu.yaml 的 variables 配置 inputs 和 output
+    # 示例: 给 input 'u' 一个阶跃信号
+    #
+    # inputs = {
+    #     "u": (0.0, 1.0),  # 0~5s 为 0，5s 后为 1
+    # }
+    # outputs = ["y"]  # 记录输出变量
+
+    inputs = {}
+    outputs = ["y"]
+
+    result = simulate_fmu(
+        fmu_path,
+        start_time=0,
+        stop_time=10,
+        step_size=0.1,
+        inputs=inputs,
+        outputs=outputs,
+    )
+
+    print(result)
+
+    # ---- 验证 ----
+    # TODO: 根据模型物理含义验证结果
+    # 示例: RC 低通滤波器 5 个时间常数后应逼近输入
+    #
+    # if outputs and len(result) > 0:
+    #     final_value = result[outputs[0]][-1]
+    #     print(f"\n最终值: {outputs[0]} = {final_value}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

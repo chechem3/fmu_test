@@ -21,6 +21,7 @@ variables:
   causality: output
 model:
   step: euler
+  prefix: rc
   state_type: RcState
   sources:
   - src/user_model.c

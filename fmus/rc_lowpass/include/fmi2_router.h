@@ -3,16 +3,15 @@
 
 /* ============================================================
  * fmi2_router.h —— VR 路由表（由 fmu-pack 自动生成，勿手动编辑）
- * 模型: rc_lowpass
- * 变量数: 3
+ * 模型:     rc_lowpass
  * 状态类型: RcState
+ * 变量数:   3
  * ============================================================ */
 
 #include "fmi2TypesPlatform.h"
 #include "user_model.h"
 
 /* ---- valueReference 枚举 ---- */
-/* rc_lowpass 变量 valueReference 枚举 —— 由 fmu-pack 自动生成 */
 typedef enum {
     VR_TAU = 1,  /* parameter */
     VR_U = 2,  /* input */

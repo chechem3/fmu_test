@@ -1,6 +1,7 @@
 # fmu-pack Python 依赖
-# 安装: pip install -r requirements.txt
+# 安装: pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 jinja2>=3.0
 lxml>=4.9
 pyyaml>=6.0
+fmpy

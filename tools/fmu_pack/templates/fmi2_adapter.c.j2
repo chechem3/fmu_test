@@ -1,8 +1,8 @@
 /* ============================================================
  * fmi2_adapter.c —— 由 fmu-pack 自动生成，勿手动编辑
- * 模型:     rc_lowpass
- * 状态类型: RcState
- * 回调前缀: rc
+ * 模型:     {{ model_identifier }}
+ * 状态类型: {{ state_type }}
+ * 回调前缀: {{ prefix }}
  *
  * 改 fmu.yaml 后运行 fmu-pack build 重新生成此文件
  * ============================================================ */
@@ -24,7 +24,7 @@ typedef enum {
 } FmuState;
 
 typedef struct {
-    RcState model;             /* 用户模型状态 */
+    {{ state_type }} model;             /* 用户模型状态 */
     FmuState state;                  /* FMI 状态机 */
     fmi2Real t_start;                /* 仿真起始时间 */
     fmi2Real t_current;              /* 当前通信点时间 */
@@ -135,7 +135,7 @@ fmi2Component fmi2Instantiate(fmi2String instanceName, fmi2Type fmuType,
     }
 
     /* 调用用户模型 init 回调 */
-    if (rc_init(&inst->model) != 0) {
+    if ({{ prefix }}_init(&inst->model) != 0) {
         log_msg(inst, fmi2Error, "logStatusError",
                 "fmi2Instantiate: 模型初始化失败");
         free(inst);
@@ -149,7 +149,7 @@ fmi2Component fmi2Instantiate(fmi2String instanceName, fmi2Type fmuType,
 void fmi2FreeInstance(fmi2Component c) {
     ModelInstance* inst = (ModelInstance*)c;
     if (!inst) return;
-    rc_terminate(&inst->model);
+    {{ prefix }}_terminate(&inst->model);
     free(inst);
 }
 
@@ -199,8 +199,8 @@ fmi2Status fmi2Reset(fmi2Component c) {
     ModelInstance* inst = (ModelInstance*)c;
     if (!inst) return fmi2Error;
     /* 重置模型到初始状态 */
-    rc_terminate(&inst->model);
-    rc_init(&inst->model);
+    {{ prefix }}_terminate(&inst->model);
+    {{ prefix }}_init(&inst->model);
     inst->state = STATE_INSTANTIATED;
     inst->t_current = inst->t_start;
     return fmi2OK;
@@ -213,7 +213,7 @@ fmi2Status fmi2GetReal(fmi2Component c, const fmi2ValueReference vr[],
     ModelInstance* inst = (ModelInstance*)c;
     if (!inst) return fmi2Error;
     if (inst->state == STATE_TERMINATED) return fmi2Error;
-    rc_lowpass_route_getReal(&inst->model, vr, nvr, value);
+    {{ model_identifier }}_route_getReal(&inst->model, vr, nvr, value);
     return fmi2OK;
 }
 
@@ -222,7 +222,7 @@ fmi2Status fmi2SetReal(fmi2Component c, const fmi2ValueReference vr[],
     ModelInstance* inst = (ModelInstance*)c;
     if (!inst) return fmi2Error;
     if (inst->state == STATE_TERMINATED) return fmi2Error;
-    rc_lowpass_route_setReal(&inst->model, vr, nvr, value);
+    {{ model_identifier }}_route_setReal(&inst->model, vr, nvr, value);
     return fmi2OK;
 }
 
@@ -348,7 +348,7 @@ fmi2Status fmi2DoStep(fmi2Component c,
     (void)noSetFMUStatePriorToCurrentPoint;
 
     /* 调用用户模型 step 回调 */
-    int ret = rc_step(&inst->model, currentCommunicationPoint, communicationStepSize);
+    int ret = {{ prefix }}_step(&inst->model, currentCommunicationPoint, communicationStepSize);
     if (ret != 0) {
         log_msg(inst, fmi2Error, "logStatusError",
                 "fmi2DoStep: 模型 step 返回错误");

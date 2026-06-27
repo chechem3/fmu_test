@@ -1,12 +1,13 @@
 """CLI 入口 —— fmu-pack 命令行工具
 
 子命令:
-  init        在当前目录生成 fmu.yaml 模板
-  validate    校验 fmu.yaml 配置 + 渲染 XML 并做 XSD 校验
-  build       完整构建流程: 校验 → 路由头 → 编译 → 打包
-  gen-router  仅生成 VR 路由头文件
-  inspect     查看 .fmu 内部结构（文件列表 + 变量信息）
-  clean       清理 build/ 和 dist/ 目录
+  init         生成完整 FMU 项目骨架（fmu.yaml + fmi2_adapter.c + user_model + CMake）
+  validate     校验 fmu.yaml 配置 + 渲染 XML 并做 XSD 校验
+  build        完整构建流程: 校验 → 生成代码 → 编译 → 打包
+  gen-adapter  仅重新生成 fmi2_adapter.c（fmu.yaml 改了之后用）
+  gen-router   仅生成 VR 路由头文件
+  inspect      查看 .fmu 内部结构（文件列表 + 变量信息）
+  clean        清理 build/ 和 dist/ 目录
 
 退出码:
   0  成功
@@ -20,28 +21,192 @@
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 from .config import load_config, validate_config
+from .adapter_gen import (
+    generate_adapter, generate_user_model_h, generate_user_model_c,
+    _resolve_prefix, _resolve_state_type,
+)
 from .router_gen import generate_router_header
 from .xml_gen import render_model_description
 from .validator import validate_xml
 from .builder import build_platform
 from .packager import assemble_fmu
+from jinja2 import Environment, FileSystemLoader
+
+
+# ---- Jinja2 环境（用于 README / test 模板）----
+_TEMPLATE_DIR = Path(__file__).parent / "templates"
+_env = Environment(
+    loader=FileSystemLoader(str(_TEMPLATE_DIR)),
+    trim_blocks=True,
+    lstrip_blocks=True,
+)
+_README_TEMPLATE = _env.get_template("README.md.j2")
+_TEST_TEMPLATE = _env.get_template("my_fmu_test.py.j2")
+
+
+def generate_readme(config: dict[str, Any], output_path: Path) -> Path:
+    """生成 README.md"""
+    content = _README_TEMPLATE.render(
+        model_identifier=config["fmi"]["modelIdentifier"],
+        prefix=_resolve_prefix(config),
+        state_type=_resolve_state_type(config),
+        variables=config.get("variables", []),
+    )
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(content, encoding="utf-8")
+    return output_path
+
+
+def generate_test_script(config: dict[str, Any], output_path: Path) -> Path:
+    """生成 test/my_fmu_test.py"""
+    content = _TEST_TEMPLATE.render(
+        model_identifier=config["fmi"]["modelIdentifier"],
+        variables=config.get("variables", []),
+    )
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(content, encoding="utf-8")
+    return output_path
+
+
+# ---- 默认 CMakeLists.txt 模板 ----
+
+CMAKE_TEMPLATE = """# CMakeLists.txt —— {model_identifier} FMU
+# 由 fmu-pack init 生成，用户可手动修改以满足项目特定需求
+cmake_minimum_required(VERSION 3.20)
+project({model_identifier} C)
+
+# ---- 头文件路径 ----
+include_directories("${{CMAKE_SOURCE_DIR}}/include")
+include_directories("${{CMAKE_SOURCE_DIR}}/../../third_party/fmi2/include")
+{extra_includes}
+
+# ---- 源文件 ----
+set(SOURCES
+    src/user_model.c
+    src/fmi2_adapter.c
+)
+
+# ---- 共享库 ----
+add_library({model_identifier} SHARED ${{SOURCES}})
+
+# 输出文件名: 去掉 lib 前缀
+set_target_properties({model_identifier} PROPERTIES
+    PREFIX ""
+    SUFFIX ".dll"
+)
+
+# Windows: 导出 FMI 符号
+if(WIN32)
+    target_compile_definitions({model_identifier} PRIVATE
+        "FMI2_Export=__declspec(dllexport)"
+    )
+endif()
+
+{extra_setup}
+{extra_links}
+"""
+
+
+def _default_cmake(config: dict, project_dir: Path) -> str:
+    """生成默认 CMakeLists.txt 字符串"""
+    mi = config["fmi"]["modelIdentifier"]
+    model = config.get("model", {})
+    link_cfg = model.get("link", {})
+
+    extra_includes: list[str] = []
+    extra_setup: list[str] = []
+    extra_links: list[str] = []
+    has_cxx_lib = False
+
+    for lib_name, lib_spec in link_cfg.items():
+        if not isinstance(lib_spec, dict):
+            continue
+        inc_path = lib_spec.get("include")
+        if inc_path:
+            p = (project_dir / inc_path).resolve()
+            extra_includes.append(
+                f'include_directories("{p.as_posix()}")'
+            )
+
+        lib_dir = lib_spec.get("lib_dir")
+        libs = lib_spec.get("libs", [])
+        lib_files: list[str] = []
+        if lib_dir:
+            p = (project_dir / lib_dir).resolve()
+            for lib in libs:
+                for ext in [".a", ".lib"]:
+                    candidate = p / f"lib{lib}{ext}"
+                    if candidate.exists():
+                        lib_files.append(f'"{candidate.as_posix()}"')
+                        break
+
+        if lib_files:
+            extra_links.append(
+                f"target_link_libraries({mi} PRIVATE {' '.join(lib_files)})"
+            )
+        if "ws2_32" in libs or "iphlpapi" in libs:
+            # Windows 系统库
+            pass
+
+        if lib_name == "zeromq":
+            extra_setup.append(f"target_compile_definitions({mi} PRIVATE ZMQ_STATIC)")
+            extra_setup.append(f"set_target_properties({mi} PROPERTIES LINKER_LANGUAGE CXX)")
+            has_cxx_lib = True
+
+    # Windows 系统库
+    win_sys_libs = []
+    if link_cfg:
+        win_sys_libs = ["ws2_32", "iphlpapi"]
+    if win_sys_libs:
+        extra_links.append(
+            f"target_link_libraries({mi} PRIVATE {' '.join(win_sys_libs)})"
+        )
+
+    if has_cxx_lib:
+        # 改 project() 声明为 C CXX
+        # 通过在 extra_setup 里加 message 提示
+        extra_setup.append(
+            f'# C++ static library detected, set LINKER_LANGUAGE CXX above'
+        )
+
+    return CMAKE_TEMPLATE.format(
+        model_identifier=mi,
+        extra_includes="\n".join(extra_includes),
+        extra_setup="\n".join(extra_setup),
+        extra_links="\n".join(extra_links),
+    )
 
 
 def cmd_init(args: argparse.Namespace) -> int:
-    """在当前目录生成 fmu.yaml 模板
+    """生成完整 FMU 项目骨架
 
-    模板包含一个 RC 低通滤波器的示例配置，用户可在此基础上修改。
-    如果目标文件已存在则不会覆盖，返回 1。
+    生成以下文件（已存在则跳过）:
+      - fmu.yaml              (项目配置)
+      - src/fmi2_adapter.c    (FMI 2.0 适配层，自动生成)
+      - include/user_model.h  (用户模型头，用户填充)
+      - src/user_model.c      (用户模型实现，用户填充)
+      - CMakeLists.txt        (构建配置)
+      - README.md             (项目说明 + AI 交互逻辑)
+      - test/my_fmu_test.py   (测试脚本)
+
+    --force 选项覆盖已存在文件
     """
-    target = Path(args.directory or ".") / "fmu.yaml"
-    if target.exists():
-        print(f"[错误] {target} 已存在，不会覆盖")
-        return 1
+    target_dir = Path(args.directory or ".")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    force = getattr(args, "force", False)
 
-    # fmu.yaml 模板内容，包含 fmi 元信息、变量定义、模型配置、目标平台
-    template = """# FMU 2.0 模型描述文件（由 fmu-pack init 生成）
+    if (target_dir / "fmu.yaml").exists() and not force:
+        # fmu.yaml 已存在：使用现有配置
+        print(f"[信息] fmu.yaml 已存在，使用现有配置")
+        config = load_config(target_dir / "fmu.yaml")
+    else:
+        # 生成新 fmu.yaml 模板
+        yaml_template = """# FMU 2.0 模型描述文件（由 fmu-pack init 生成）
 fmi:
   version: "2.0"
   kind: "CoSimulation"
@@ -56,13 +221,91 @@ variables:
 
 model:
   step: "euler"
+  prefix: "model"
+  state_type: "ModelState"
   sources: ["src/user_model.c"]
 
 platforms: ["win64"]
 """
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(template, encoding="utf-8")
-    print(f"[OK] 已生成 {target}")
+        yaml_path = target_dir / "fmu.yaml"
+        yaml_path.write_text(yaml_template, encoding="utf-8")
+        print(f"[OK] 已生成 {yaml_path}")
+        config = load_config(yaml_path)
+
+    # ---- 生成 fmi2_adapter.c（自动生成）----
+    adapter_path = target_dir / "src" / "fmi2_adapter.c"
+    if adapter_path.exists() and not force:
+        print(f"[跳过] {adapter_path} 已存在（用 --force 覆盖）")
+    else:
+        generate_adapter(config, adapter_path)
+        print(f"[OK] 已生成 {adapter_path}")
+
+    # ---- 生成 user_model.h 骨架（仅在不存在时）----
+    h_path = target_dir / "include" / "user_model.h"
+    if h_path.exists() and not force:
+        print(f"[跳过] {h_path} 已存在（用 --force 覆盖）")
+    else:
+        generate_user_model_h(config, h_path)
+        print(f"[OK] 已生成 {h_path}")
+
+    # ---- 生成 user_model.c 骨架（仅在不存在时）----
+    c_path = target_dir / "src" / "user_model.c"
+    if c_path.exists() and not force:
+        print(f"[跳过] {c_path} 已存在（用 --force 覆盖）")
+    else:
+        generate_user_model_c(config, c_path)
+        print(f"[OK] 已生成 {c_path}")
+
+    # ---- 生成 CMakeLists.txt（仅在不存在时）----
+    cmake_path = target_dir / "CMakeLists.txt"
+    if cmake_path.exists() and not force:
+        print(f"[跳过] {cmake_path} 已存在（用 --force 覆盖）")
+    else:
+        cmake_content = _default_cmake(config, target_dir)
+        cmake_path.write_text(cmake_content, encoding="utf-8")
+        print(f"[OK] 已生成 {cmake_path}")
+
+    # ---- 生成 README.md（项目说明）----
+    readme_path = target_dir / "README.md"
+    if readme_path.exists() and not force:
+        print(f"[跳过] {readme_path} 已存在（用 --force 覆盖）")
+    else:
+        generate_readme(config, readme_path)
+        print(f"[OK] 已生成 {readme_path}")
+
+    # ---- 生成 test/my_fmu_test.py（测试脚本）----
+    test_path = target_dir / "test" / "my_fmu_test.py"
+    if test_path.exists() and not force:
+        print(f"[跳过] {test_path} 已存在（用 --force 覆盖）")
+    else:
+        generate_test_script(config, test_path)
+        print(f"[OK] 已生成 {test_path}")
+
+    print(f"\n项目骨架生成完成: {target_dir}")
+    print("下一步:")
+    print("  1. 编辑 fmu.yaml 声明你的变量")
+    print("  2. 在 include/user_model.h 定义状态结构体")
+    print("  3. 在 src/user_model.c 实现 init/step/terminate")
+    print("  4. 运行 fmu-pack build 构建 FMU")
+    print("  5. 运行 python test/my_fmu_test.py 测试")
+    return 0
+
+
+def cmd_gen_adapter(args: argparse.Namespace) -> int:
+    """重新生成 fmi2_adapter.c
+
+    用于 fmu.yaml 改动后，重新生成适配层（不编译）。
+    """
+    config_path = Path(args.config or "fmu.yaml")
+    if not config_path.exists():
+        print(f"[错误] 找不到 {config_path}")
+        return 1
+
+    config = load_config(config_path)
+    project_dir = config_path.parent
+    adapter_path = project_dir / "src" / "fmi2_adapter.c"
+    generate_adapter(config, adapter_path)
+    print(f"[OK] 已生成 {adapter_path}")
     return 0
 
 
@@ -107,15 +350,16 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 
 def cmd_build(args: argparse.Namespace) -> int:
-    """完整构建流程: 校验 → 路由头 → 编译 → 打包
+    """完整构建流程: 校验 → 生成代码 → 编译 → 打包
 
-    六步流水线:
+    七步流水线:
       1. 加载并校验 fmu.yaml
-      2. 生成 VR 路由头 fmi2_router.h
-      3. 渲染 modelDescription.xml
-      4. XSD schema 校验
-      5. 调用编译器构建各平台共享库
-      6. 组装 ZIP 打包为 .fmu
+      2. 生成 fmi2_adapter.c（自动生成，永远与 fmu.yaml 同步）
+      3. 生成 VR 路由头 fmi2_router.h
+      4. 渲染 modelDescription.xml
+      5. XSD schema 校验
+      6. 调用编译器构建各平台共享库
+      7. 组装 ZIP 打包为 .fmu
     """
     config_path = Path(args.config or "fmu.yaml")
     if not config_path.exists():
@@ -129,40 +373,45 @@ def cmd_build(args: argparse.Namespace) -> int:
         for e in errs:
             print(f"[校验失败] {e}")
         return 2
-    print("[1/6] fmu.yaml 校验通过")
+    print("[1/7] fmu.yaml 校验通过")
 
-    # 2. 生成 VR 路由头 —— 将 fmu.yaml 中的变量映射为 C 枚举 + switch-case 路由
     project_dir = config_path.parent
+
+    # 2. 生成 fmi2_adapter.c —— 永远从 fmu.yaml 重新生成（自动同步）
+    adapter_path = generate_adapter(config, project_dir / "src" / "fmi2_adapter.c")
+    print(f"[2/7] fmi2_adapter.c 已生成: {adapter_path}")
+
+    # 3. 生成 VR 路由头
     include_dir = project_dir / "include"
     include_dir.mkdir(parents=True, exist_ok=True)
     router_h = generate_router_header(config, include_dir)
-    print(f"[2/6] 路由头已生成: {router_h}")
+    print(f"[3/7] 路由头已生成: {router_h}")
 
-    # 3. 渲染 modelDescription.xml —— Jinja2 模板填充
+    # 4. 渲染 modelDescription.xml
     xml_str = render_model_description(config)
     build_dir = project_dir / "build"
     build_dir.mkdir(parents=True, exist_ok=True)
     xml_path = build_dir / "modelDescription.xml"
     xml_path.write_text(xml_str, encoding="utf-8")
-    print(f"[3/6] modelDescription.xml 已渲染")
+    print(f"[4/7] modelDescription.xml 已渲染")
 
-    # 4. XSD 校验 —— 确保 XML 符合 FMI 2.0 schema
+    # 5. XSD 校验
     xsd_path = Path(args.xsd) if args.xsd else None
     if xsd_path and xsd_path.exists():
         ok, msg = validate_xml(xml_str, xsd_path)
         if not ok:
             print(f"[XSD 校验失败] {msg}")
             return 3
-        print("[4/6] XSD 校验通过")
+        print("[5/7] XSD 校验通过")
     else:
-        print("[4/6] 跳过 XSD 校验（未提供 xsd）")
+        print("[5/7] 跳过 XSD 校验（未提供 xsd）")
 
-    # 5. 构建 —— 逐平台编译共享库（当前仅支持 win64 本地构建）
+    # 6. 构建
     platforms: list[str] = args.platform.split(",") if args.platform else config.get("platforms", ["win64"])
     binaries: dict[str, Path] = {}
     for plat in platforms:
         plat = plat.strip()
-        print(f"[5/6] 构建平台: {plat}")
+        print(f"[6/7] 构建平台: {plat}")
         result = build_platform(config, project_dir, plat, build_dir)
         if result:
             binaries[plat] = result
@@ -171,14 +420,14 @@ def cmd_build(args: argparse.Namespace) -> int:
             print(f"      [失败] {plat} 构建出错")
             return 4
 
-    # 6. 打包 FMU —— 将 XML + 二进制 + 可选资源打包为 .fmu (ZIP)
+    # 7. 打包 FMU
     dist_dir = project_dir / "dist"
     dist_dir.mkdir(parents=True, exist_ok=True)
     fmu_path = assemble_fmu(config, binaries, xml_path, project_dir, dist_dir)
     if fmu_path:
-        print(f"[6/6] FMU 已生成: {fmu_path}")
+        print(f"[7/7] FMU 已生成: {fmu_path}")
     else:
-        print("[6/6] FMU 打包失败")
+        print("[7/7] FMU 打包失败")
         return 5
 
     return 0
@@ -266,9 +515,10 @@ def main() -> None:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    # init —— 生成 fmu.yaml 模板
-    p_init = sub.add_parser("init", help="生成 fmu.yaml 模板")
+    # init —— 生成完整项目骨架
+    p_init = sub.add_parser("init", help="生成完整 FMU 项目骨架")
     p_init.add_argument("directory", nargs="?", help="目标目录（默认当前目录）")
+    p_init.add_argument("--force", action="store_true", help="覆盖已存在文件")
 
     # validate —— 校验配置 + 可选 XSD 校验
     p_val = sub.add_parser("validate", help="校验 fmu.yaml + XSD")
@@ -280,6 +530,10 @@ def main() -> None:
     p_build.add_argument("--config", "-c", help="fmu.yaml 路径")
     p_build.add_argument("--platform", "-p", help="目标平台，逗号分隔（默认取 fmu.yaml 中的 platforms）")
     p_build.add_argument("--xsd", help="fmi2ModelDescription.xsd 路径")
+
+    # gen-adapter —— 仅重新生成 fmi2_adapter.c
+    p_ga = sub.add_parser("gen-adapter", help="仅重新生成 fmi2_adapter.c")
+    p_ga.add_argument("--config", "-c", help="fmu.yaml 路径")
 
     # gen-router —— 仅生成路由头
     p_gr = sub.add_parser("gen-router", help="仅生成 VR 路由头")
@@ -300,6 +554,7 @@ def main() -> None:
         "init": cmd_init,
         "validate": cmd_validate,
         "build": cmd_build,
+        "gen-adapter": cmd_gen_adapter,
         "gen-router": cmd_gen_router,
         "inspect": cmd_inspect,
         "clean": cmd_clean,

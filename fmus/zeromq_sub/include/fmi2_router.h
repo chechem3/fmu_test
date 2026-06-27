@@ -3,16 +3,15 @@
 
 /* ============================================================
  * fmi2_router.h —— VR 路由表（由 fmu-pack 自动生成，勿手动编辑）
- * 模型: zmqsub
- * 变量数: 4
+ * 模型:     zmqsub
  * 状态类型: ZmqSubState
+ * 变量数:   4
  * ============================================================ */
 
 #include "fmi2TypesPlatform.h"
 #include "user_model.h"
 
 /* ---- valueReference 枚举 ---- */
-/* zmqsub 变量 valueReference 枚举 —— 由 fmu-pack 自动生成 */
 typedef enum {
     VR_GAIN = 1,  /* parameter */
     VR_Y = 2,  /* output */
