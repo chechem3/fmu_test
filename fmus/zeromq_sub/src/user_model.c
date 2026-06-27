@@ -9,6 +9,8 @@
  * ZMQ 端点配置（可修改）:
  *   ZMQ_ENDPOINT: 发布端地址，默认 "tcp://localhost:5555"
  *   ZMQ_TOPIC:    订阅主题，默认 ""（接收所有消息）
+ *
+ * 状态结构体 ZmqSubState 定义在 user_model.h
  */
 
 #include "user_model.h"
@@ -21,110 +23,105 @@
 #include <stdlib.h>
 
 /* ---- ZMQ 配置 ---- */
-/* 发布端地址，可按需修改 */
 #define ZMQ_ENDPOINT "tcp://localhost:5555"
-/* 订阅主题，空字符串表示接收所有消息 */
 #define ZMQ_TOPIC ""
 
-int zmqsub_init(ZmqSubState* state) {
-    if (!state) return -1;
-
-    /* 初始化默认值 */
-    state->gain = 1.0;
-    state->y = 0.0;
-    state->raw_value = 0.0;
-    state->has_new_data = 0;
-    state->zmq_ctx = NULL;
-    state->zmq_sock = NULL;
+void* model_init(void) {
+    ZmqSubState* s = (ZmqSubState*)malloc(sizeof(ZmqSubState));
+    if (!s) return NULL;
+    s->gain = 1.0;
+    s->y = 0.0;
+    s->raw_value = 0.0;
+    s->has_new_data = 0;
+    s->zmq_ctx = NULL;
+    s->zmq_sock = NULL;
 
     /* 创建 ZMQ context */
-    state->zmq_ctx = zmq_ctx_new();
-    if (!state->zmq_ctx) {
+    s->zmq_ctx = zmq_ctx_new();
+    if (!s->zmq_ctx) {
         fprintf(stderr, "[zmqsub] zmq_ctx_new 失败\n");
-        return -1;
+        free(s);
+        return NULL;
     }
 
     /* 创建 SUB socket */
-    state->zmq_sock = zmq_socket(state->zmq_ctx, ZMQ_SUB);
-    if (!state->zmq_sock) {
+    s->zmq_sock = zmq_socket(s->zmq_ctx, ZMQ_SUB);
+    if (!s->zmq_sock) {
         fprintf(stderr, "[zmqsub] zmq_socket 失败\n");
-        zmq_ctx_destroy(state->zmq_ctx);
-        state->zmq_ctx = NULL;
-        return -1;
+        zmq_ctx_destroy(s->zmq_ctx);
+        free(s);
+        return NULL;
     }
 
     /* 设置订阅主题 */
-    int rc = zmq_setsockopt(state->zmq_sock, ZMQ_SUBSCRIBE, ZMQ_TOPIC, strlen(ZMQ_TOPIC));
+    int rc = zmq_setsockopt(s->zmq_sock, ZMQ_SUBSCRIBE, ZMQ_TOPIC, strlen(ZMQ_TOPIC));
     if (rc != 0) {
         fprintf(stderr, "[zmqsub] zmq_setsockopt SUBSCRIBE 失败\n");
-        zmq_close(state->zmq_sock);
-        zmq_ctx_destroy(state->zmq_ctx);
-        state->zmq_sock = NULL;
-        state->zmq_ctx = NULL;
-        return -1;
+        zmq_close(s->zmq_sock);
+        zmq_ctx_destroy(s->zmq_ctx);
+        free(s);
+        return NULL;
     }
 
     /* 连接到发布端 */
-    rc = zmq_connect(state->zmq_sock, ZMQ_ENDPOINT);
+    rc = zmq_connect(s->zmq_sock, ZMQ_ENDPOINT);
     if (rc != 0) {
         fprintf(stderr, "[zmqsub] zmq_connect(%s) 失败: %s\n",
                 ZMQ_ENDPOINT, zmq_strerror(zmq_errno()));
-        zmq_close(state->zmq_sock);
-        zmq_ctx_destroy(state->zmq_ctx);
-        state->zmq_sock = NULL;
-        state->zmq_ctx = NULL;
-        return -1;
+        zmq_close(s->zmq_sock);
+        zmq_ctx_destroy(s->zmq_ctx);
+        free(s);
+        return NULL;
     }
 
     printf("[zmqsub] 已连接到 %s，订阅主题 '%s'\n", ZMQ_ENDPOINT, ZMQ_TOPIC);
-    return 0;
+    return s;
 }
 
-int zmqsub_step(ZmqSubState* state, double t, double dt) {
+int model_step(void* state, double t, double dt) {
     (void)t;
     (void)dt;
     if (!state) return -1;
+    ZmqSubState* s = (ZmqSubState*)state;
 
-    state->has_new_data = 0;
+    s->has_new_data = 0;
 
     /* 非阻塞轮询 ZMQ socket */
-    zmq_pollitem_t items[] = { { state->zmq_sock, 0, ZMQ_POLLIN, 0 } };
-    int rc = zmq_poll(items, 1, 0);  /* timeout=0 立即返回 */
+    zmq_pollitem_t items[] = { { s->zmq_sock, 0, ZMQ_POLLIN, 0 } };
+    int rc = zmq_poll(items, 1, 0);
     if (rc < 0) {
         fprintf(stderr, "[zmqsub] zmq_poll 错误\n");
         return -1;
     }
 
     if (items[0].revents & ZMQ_POLLIN) {
-        /* 有数据到达，接收消息 */
         char buf[256];
-        int n = zmq_recv(state->zmq_sock, buf, sizeof(buf) - 1, 0);
+        int n = zmq_recv(s->zmq_sock, buf, sizeof(buf) - 1, 0);
         if (n > 0) {
             buf[n] = '\0';
-            /* 尝试解析为 double */
             char* endptr = NULL;
             double val = strtod(buf, &endptr);
             if (endptr != buf) {
-                state->raw_value = val;
-                state->has_new_data = 1;
+                s->raw_value = val;
+                s->has_new_data = 1;
             }
         }
     }
 
-    /* 输出 = 接收值 * gain */
-    state->y = state->raw_value * state->gain;
+    s->y = s->raw_value * s->gain;
     return 0;
 }
 
-void zmqsub_terminate(ZmqSubState* state) {
+void model_terminate(void* state) {
     if (!state) return;
-
-    if (state->zmq_sock) {
-        zmq_close(state->zmq_sock);
-        state->zmq_sock = NULL;
+    ZmqSubState* s = (ZmqSubState*)state;
+    if (s->zmq_sock) {
+        zmq_close(s->zmq_sock);
+        s->zmq_sock = NULL;
     }
-    if (state->zmq_ctx) {
-        zmq_ctx_destroy(state->zmq_ctx);
-        state->zmq_ctx = NULL;
+    if (s->zmq_ctx) {
+        zmq_ctx_destroy(s->zmq_ctx);
+        s->zmq_ctx = NULL;
     }
+    free(s);
 }

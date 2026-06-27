@@ -1,9 +1,7 @@
 """zmqsub FMU 测试脚本
 
-使用 FMPy 加载并仿真生成的 FMU。
-
-前置条件:
-  pip install fmpy
+zmqsub 的数据来自 ZMQ socket（不是 FMI input），所以 input=None。
+若无外部 ZMQ PUB 端，y 将保持 0（无新数据）。
 
 运行:
   python test/my_fmu_test.py
@@ -12,17 +10,16 @@
 import os
 import sys
 
-# 检查 FMPy 是否安装
 try:
     from fmpy import simulate_fmu
+    import numpy as np
 except ImportError:
-    print("[错误] FMPy 未安装")
-    print("请运行: pip install fmpy")
+    print("[错误] FMPy 或 numpy 未安装")
+    print("请运行: pip install fmpy numpy")
     sys.exit(1)
 
 
 def main():
-    # FMU 路径: ../dist/zmqsub.fmu
     fmu_path = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
         "..", "dist", "zmqsub.fmu"
@@ -33,39 +30,31 @@ def main():
         print("请先运行 fmu-pack build 生成 FMU")
         sys.exit(1)
 
-    print(f"=== zmqsub FMU 测试 ===\n")
-    print(f"FMU: {fmu_path}\n")
-
-    # ---- 仿真配置 ----
-    # TODO: 根据 fmu.yaml 的 variables 配置 inputs 和 output
-    # 示例: 给 input 'u' 一个阶跃信号
-    #
-    # inputs = {
-    #     "u": (0.0, 1.0),  # 0~5s 为 0，5s 后为 1
-    # }
-    # outputs = ["y"]  # 记录输出变量
-
-    inputs = {}
-    outputs = ["y", "has_new_data"]
+    print(f"=== zmqsub FMU 测试 ===")
+    print(f"FMU: {fmu_path}")
+    print(f"提示: 无 ZMQ PUB 端时，y 保持为 0")
+    print(f"      启动 PUB 端: python -c \"import zmq,time;")
+    print(f"        c=zmq.Context();s=c.socket(zmq.PUB);s.bind('tcp://*:5555')\"")
+    print()
 
     result = simulate_fmu(
         fmu_path,
         start_time=0,
-        stop_time=10,
+        stop_time=5,
         step_size=0.1,
-        inputs=inputs,
-        outputs=outputs,
+        output=["y", "has_new_data", "raw_value"],
+        input=None,  # zmqsub 数据来自 ZMQ socket，不走 FMI input
     )
 
-    print(result)
-
-    # ---- 验证 ----
-    # TODO: 根据模型物理含义验证结果
-    # 示例: RC 低通滤波器 5 个时间常数后应逼近输入
-    #
-    # if outputs and len(result) > 0:
-    #     final_value = result[outputs[0]][-1]
-    #     print(f"\n最终值: {outputs[0]} = {final_value}")
+    # 打印关键时间点的输出
+    print("时间(s)   y          raw_value   has_new_data")
+    print("-" * 55)
+    for t_check in [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]:
+        idx = int(np.abs(result["time"] - t_check).argmin())
+        y_val = result["y"][idx]
+        raw_val = result["raw_value"][idx]
+        has_new = result["has_new_data"][idx]
+        print(f"{t_check:6.1f}    {y_val:9.4f}   {raw_val:9.4f}   {has_new:.0f}")
 
     return 0
 

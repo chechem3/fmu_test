@@ -131,10 +131,29 @@ def render_model_description(config: dict[str, Any]) -> str:
         if causality in ("output", "local") and v.get("initial") == "approx":
             initial_unknowns.append(i)
 
+    # 默认 start 值: input/parameter 变量若无显式 start，默认为 0.0
+    # FMI 2.0 规范要求 input 必须有 start（importer 不驱动时用此值）
+    type_defaults = {
+        "Real": 0.0,
+        "Integer": 0,
+        "Boolean": 0,
+        "String": "",
+    }
+    processed_vars: list[dict] = []
+    for v in variables:
+        v = dict(v)  # 复制避免污染原 config
+        vtype = v.get("type", "Real")
+        causality = v.get("causality", "local")
+        # input/parameter/calculatedParameter 需要 start
+        if causality in ("input", "parameter", "calculatedParameter") and "start" not in v:
+            v["start"] = type_defaults.get(vtype, 0.0)
+        # output 不能有 start（已在 config 校验中检查）
+        processed_vars.append(v)
+
     template = _env.from_string(XML_TEMPLATE)
     return template.render(
         fmi=fmi,
-        variables=variables,
+        variables=processed_vars,
         outputs=outputs if outputs else None,
         derivatives=derivatives if derivatives else None,
         initial_unknowns=initial_unknowns if initial_unknowns else None,

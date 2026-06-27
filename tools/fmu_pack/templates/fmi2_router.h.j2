@@ -2,17 +2,15 @@
  * fmi2_router.h —— VR 路由表
  * 由 fmu-pack 自动生成，勿手动编辑
  *
- * 模板变量:
- *   model_identifier: FMU 模型标识符
- *   state_type:      用户状态结构体类型名
- *   variables:       变量列表（每项: name, vr, type, causality）
+ * 设计: 路由函数名固定为 model_route_getReal/_setReal
+ *       接收 void* state，由用户模型在 user_model.h 中定义具体类型
+ *       适配层 fmi2_adapter.c 完全不感知 state type
  * ============================================================ #}
 #ifndef FMI2_ROUTER_H_
 #define FMI2_ROUTER_H_
 
 /* ============================================================
  * fmi2_router.h —— VR 路由表（由 fmu-pack 自动生成，勿手动编辑）
- * 模型:     {{ model_identifier }}
  * 状态类型: {{ state_type }}
  * 变量数:   {{ variables | length }}
  * ============================================================ */
@@ -28,19 +26,20 @@ typedef enum {
 {% endif %}
 {% endfor %}
     VR_COUNT = {{ variables | length }}
-} {{ model_identifier }}_VR;
+} ModelVR;
 
 
-/* ---- getReal 路由（内联函数） ---- */
-static inline void {{ model_identifier }}_route_getReal({{ state_type }}* state,
+/* ---- getReal 路由（内联函数，固定名 model_route_getReal）---- */
+static inline void model_route_getReal(void* state,
                                        const fmi2ValueReference vr[],
                                        size_t nvr,
                                        fmi2Real value[]) {
+    {{ state_type }}* s = ({{ state_type }}*)state;
     for (size_t i = 0; i < nvr; i++) {
         switch (vr[i]) {
 {% for var in variables %}
 {% if var.type == "Real" %}
-        case VR_{{ var.name | upper }}: value[i] = state->{{ var.name }}; break;
+        case VR_{{ var.name | upper }}: value[i] = s->{{ var.name }}; break;
 {% endif %}
 {% endfor %}
             default: break;
@@ -48,16 +47,17 @@ static inline void {{ model_identifier }}_route_getReal({{ state_type }}* state,
     }
 }
 
-/* ---- setReal 路由（内联函数） ---- */
-static inline void {{ model_identifier }}_route_setReal({{ state_type }}* state,
+/* ---- setReal 路由（内联函数，固定名 model_route_setReal）---- */
+static inline void model_route_setReal(void* state,
                                        const fmi2ValueReference vr[],
                                        size_t nvr,
                                        const fmi2Real value[]) {
+    {{ state_type }}* s = ({{ state_type }}*)state;
     for (size_t i = 0; i < nvr; i++) {
         switch (vr[i]) {
 {% for var in variables %}
 {% if var.type == "Real" and var.causality in ("input", "parameter") %}
-        case VR_{{ var.name | upper }}: state->{{ var.name }} = value[i]; break;
+        case VR_{{ var.name | upper }}: s->{{ var.name }} = value[i]; break;
 {% endif %}
 {% endfor %}
             default: break;

@@ -1,4 +1,4 @@
-"""{{ model_identifier }} FMU 测试脚本
+"""MyModel FMU 测试脚本
 
 使用 FMPy 加载并仿真生成的 FMU。
 
@@ -24,7 +24,7 @@ except ImportError:
 def main():
     fmu_path = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
-        "..", "dist", "{{ model_identifier }}.fmu"
+        "..", "dist", "MyModel.fmu"
     )
 
     if not os.path.exists(fmu_path):
@@ -32,7 +32,7 @@ def main():
         print("请先运行 fmu-pack build 生成 FMU")
         sys.exit(1)
 
-    print(f"=== {{ model_identifier }} FMU 测试 ===")
+    print(f"=== MyModel FMU 测试 ===")
     print(f"FMU: {fmu_path}")
     print()
 
@@ -52,7 +52,7 @@ def main():
     # )
 
     # 找出所有 input 变量，构造空输入信号（用 start 值）
-    input_names = [{% for v in variables %}{% if v.causality == "input" %}"{{ v.name }}"{% if not loop.last %}, {% endif %}{% endif %}{% endfor %}]
+    input_names = ["u", ]
     if input_names:
         dtype = [("time", np.float64)] + [(n, np.float64) for n in input_names]
         input_signal = np.array(
@@ -62,13 +62,13 @@ def main():
     else:
         input_signal = None
 
-    output_vars = [{% for v in variables %}{% if v.causality == "output" %}"{{ v.name }}"{% if not loop.last %}, {% endif %}{% endif %}{% endfor %}]
+    output_vars = ["y"]
 
     result = simulate_fmu(
         fmu_path,
         start_time=0,
-        stop_time={{ stop_time | default(10) }},
-        step_size={{ step_size | default(0.1) }},
+        stop_time=10,
+        step_size=0.1,
         output=output_vars,
         input=input_signal,
     )

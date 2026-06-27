@@ -105,6 +105,16 @@ if(WIN32)
     target_compile_definitions({model_identifier} PRIVATE
         "FMI2_Export=__declspec(dllexport)"
     )
+
+    # 静态链接 C/C++ 运行时，避免 FMU 依赖 libgcc_s_seh-1.dll / libstdc++-6.dll
+    # 这些 DLL 在 FMPy 提取 FMU 的 temp 目录中找不到
+    if(MINGW)
+        target_link_options({model_identifier} PRIVATE
+            "-static-libgcc"
+            "-static-libstdc++"
+            "-static"
+        )
+    endif()
 endif()
 
 {extra_setup}

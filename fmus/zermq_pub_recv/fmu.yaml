@@ -1,8 +1,8 @@
 fmi:
   version: '2.0'
   kind: CoSimulation
-  modelIdentifier: rc_lowpass
-  guid: aafcfb5e-a358-4151-be39-89dfc7503169
+  modelIdentifier: MyModel
+  guid: 6a4e2af7-f52f-426b-a793-06a006368d56
   generationTool: fmu-pack 0.1.0
 variables:
 - name: tau
@@ -21,7 +21,8 @@ variables:
   causality: output
 model:
   step: euler
-  state_type: RcState
+  prefix: model
+  state_type: ModelState
   sources:
   - src/user_model.c
 platforms:

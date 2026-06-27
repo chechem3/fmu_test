@@ -25,7 +25,6 @@ variables:
   causality: output
 model:
   step: euler
-  prefix: zmqsub
   state_type: ZmqSubState
   sources:
   - src/user_model.c

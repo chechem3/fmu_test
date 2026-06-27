@@ -1,10 +1,10 @@
 /* ============================================================
- * fmi2_adapter.c —— 由 fmu-pack 自动生成，勿手动编辑
- * 模型:     zmqsub
- * 状态类型: ZmqSubState
- * 回调前缀: zmqsub
+ * fmi2_adapter.c —— FMI 2.0 Co-Simulation 适配层
+ * 由 fmu-pack 自动生成，勿手动编辑
  *
- * 改 fmu.yaml 后运行 fmu-pack build 重新生成此文件
+ * 设计: 适配层只持有 void* model_state，不感知具体状态结构。
+ *       用户模型负责: model_init (malloc) / model_step / model_terminate (free)。
+ *       因此所有 FMU 项目的 fmi2_adapter.c 字节级一致。
  * ============================================================ */
 
 #include "fmi2Functions.h"
@@ -24,13 +24,13 @@ typedef enum {
 } FmuState;
 
 typedef struct {
-    ZmqSubState model;             /* 用户模型状态 */
-    FmuState state;                  /* FMI 状态机 */
-    fmi2Real t_start;                /* 仿真起始时间 */
-    fmi2Real t_current;              /* 当前通信点时间 */
-    fmi2String instance_name;        /* 实例名 */
+    void* model_state;             /* 用户模型状态（opaque，由 user_model.c 管理生命周期） */
+    FmuState state;                /* FMI 状态机 */
+    fmi2Real t_start;              /* 仿真起始时间 */
+    fmi2Real t_current;            /* 当前通信点时间 */
+    fmi2String instance_name;      /* 实例名 */
     fmi2CallbackFunctions callbacks; /* importer 回调 */
-    fmi2Boolean logging_on;          /* 日志开关 */
+    fmi2Boolean logging_on;        /* 日志开关 */
 } ModelInstance;
 
 /* ---- 日志辅助 ---- */
@@ -134,8 +134,9 @@ fmi2Component fmi2Instantiate(fmi2String instanceName, fmi2Type fmuType,
         inst->callbacks = *functions;
     }
 
-    /* 调用用户模型 init 回调 */
-    if (zmqsub_init(&inst->model) != 0) {
+    /* 调用用户模型 init 回调（用户在 model_init 中 malloc 状态） */
+    inst->model_state = model_init();
+    if (!inst->model_state) {
         log_msg(inst, fmi2Error, "logStatusError",
                 "fmi2Instantiate: 模型初始化失败");
         free(inst);
@@ -149,7 +150,11 @@ fmi2Component fmi2Instantiate(fmi2String instanceName, fmi2Type fmuType,
 void fmi2FreeInstance(fmi2Component c) {
     ModelInstance* inst = (ModelInstance*)c;
     if (!inst) return;
-    zmqsub_terminate(&inst->model);
+    /* 用户模型负责释放 model_state（model_terminate 中 free） */
+    if (inst->model_state) {
+        model_terminate(inst->model_state);
+        inst->model_state = NULL;
+    }
     free(inst);
 }
 
@@ -198,9 +203,11 @@ fmi2Status fmi2Terminate(fmi2Component c) {
 fmi2Status fmi2Reset(fmi2Component c) {
     ModelInstance* inst = (ModelInstance*)c;
     if (!inst) return fmi2Error;
-    /* 重置模型到初始状态 */
-    zmqsub_terminate(&inst->model);
-    zmqsub_init(&inst->model);
+    /* 重置: terminate + 重新 init */
+    if (inst->model_state) {
+        model_terminate(inst->model_state);
+    }
+    inst->model_state = model_init();
     inst->state = STATE_INSTANTIATED;
     inst->t_current = inst->t_start;
     return fmi2OK;
@@ -213,7 +220,7 @@ fmi2Status fmi2GetReal(fmi2Component c, const fmi2ValueReference vr[],
     ModelInstance* inst = (ModelInstance*)c;
     if (!inst) return fmi2Error;
     if (inst->state == STATE_TERMINATED) return fmi2Error;
-    zmqsub_route_getReal(&inst->model, vr, nvr, value);
+    model_route_getReal(inst->model_state, vr, nvr, value);
     return fmi2OK;
 }
 
@@ -222,7 +229,7 @@ fmi2Status fmi2SetReal(fmi2Component c, const fmi2ValueReference vr[],
     ModelInstance* inst = (ModelInstance*)c;
     if (!inst) return fmi2Error;
     if (inst->state == STATE_TERMINATED) return fmi2Error;
-    zmqsub_route_setReal(&inst->model, vr, nvr, value);
+    model_route_setReal(inst->model_state, vr, nvr, value);
     return fmi2OK;
 }
 
@@ -348,7 +355,7 @@ fmi2Status fmi2DoStep(fmi2Component c,
     (void)noSetFMUStatePriorToCurrentPoint;
 
     /* 调用用户模型 step 回调 */
-    int ret = zmqsub_step(&inst->model, currentCommunicationPoint, communicationStepSize);
+    int ret = model_step(inst->model_state, currentCommunicationPoint, communicationStepSize);
     if (ret != 0) {
         log_msg(inst, fmi2Error, "logStatusError",
                 "fmi2DoStep: 模型 step 返回错误");

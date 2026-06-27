@@ -39,9 +39,21 @@ endif()
 target_compile_definitions(zmqsub PRIVATE ZMQ_STATIC)
 
 # ---- 外部库链接 ----
-# 静态链接 libzmq.a（ZeroMQ 代码嵌入 DLL，无需外部依赖）
+# 静态链接 libzmq.a（ZeroMQ 代码嵌入 DLL，无需外部 ZeroMQ 依赖）
+# 同时静态链接 C++ 运行时（-static-libgcc/-static-libstdc++），
+# 避免依赖 libgcc_s_seh-1.dll / libstdc++-6.dll / libwinpthread-1.dll
+# （这些 DLL 在 FMPy 提取 FMU 的 temp 目录中找不到）
 target_link_libraries(zmqsub PRIVATE
     "${CMAKE_SOURCE_DIR}/../../third_party/zeromq/lib/libzmq.a"
     ws2_32
     iphlpapi
 )
+
+# Windows: 静态链接 C++ 运行时，让 FMU 自包含
+if(WIN32 AND MINGW)
+    target_link_options(zmqsub PRIVATE
+        "-static-libgcc"
+        "-static-libstdc++"
+        "-static"
+    )
+endif()
