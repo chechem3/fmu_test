@@ -5,3 +5,4 @@ jinja2>=3.0
 lxml>=4.9
 pyyaml>=6.0
 fmpy
+pyzmq>=25.0     # zeromq_io FMU 测试用：mock publisher/subscriber

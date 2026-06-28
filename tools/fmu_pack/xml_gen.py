@@ -42,6 +42,9 @@ XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 {% if v.variability %}
       variability="{{ v.variability }}"
 {% endif %}
+{% if v.initial %}
+      initial="{{ v.initial }}"
+{% endif %}
 {% if v.start is defined and v.start is not none %}
       description="start={{ v.start }}"
 {% endif %}>
@@ -95,6 +98,8 @@ def _field_to_var(f: FieldInfo, vr: int):
         "causality": f.causality,
         "fmi_type": f.fmi_type,
         "variability": "fixed" if f.causality == "parameter" else None,
+        # parameters 默认 initial=exact（允许 start_value 在 init 前被覆盖）
+        "initial": "exact" if f.causality == "parameter" else None,
         "start": _fmi_type_default(f.fmi_type, f.causality),
     }
 
