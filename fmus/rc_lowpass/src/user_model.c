@@ -1,7 +1,7 @@
 /* ============================================================
  * user_model.c —— RC 低通滤波器实现
  *
- * 欧拉法: y_{k+1} = y_k + dt * (u_k - y_k) / tau
+ * 欧拉法：y_{k+1} = y_k + dt * (u_k - y_k) / tau
  * ============================================================ */
 
 #include "user_model.h"
@@ -18,7 +18,7 @@ int model_step(UserModelParameterT* p, UserModelInputT* in, UserModelOutputT* ou
     (void)t;
     if (dt <= 0.0) return 0;
     if (p->tau <= 0.0) return -1;  /* 避免除零 */
-    /* 欧拉前向: y += dt * (u - y) / tau */
+    /* 欧拉前向：y += dt * (u - y) / tau */
     out->y += dt * (in->u - out->y) / p->tau;
     return 0;
 }

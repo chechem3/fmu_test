@@ -22,19 +22,7 @@ from .xml_gen import render_model_description
 from .validator import validate_xml
 from .builder import build_platform
 from .packager import assemble_fmu
-
-from jinja2 import Environment, FileSystemLoader
-
-
-# ---- Jinja2 环境（user_model.h / .c / README / test 模板）----
-_TEMPLATE_DIR = Path(__file__).parent / "templates"
-_env = Environment(
-    loader=FileSystemLoader(str(_TEMPLATE_DIR)),
-    trim_blocks=True,
-    lstrip_blocks=True,
-)
-_README_TEMPLATE = _env.get_template("README.md.j2")
-_TEST_TEMPLATE   = _env.get_template("my_fmu_test.py.j2")
+from .readme_gen import generate_readme, generate_test
 
 # ---- user_model.h / .c 模板（内联，因小）----
 USER_MODEL_H_TEMPLATE = """/* ============================================================
@@ -51,7 +39,7 @@ USER_MODEL_H_TEMPLATE = """/* ==================================================
  *                   double t, double dt);
  *   void model_terminate(UserModelParameterT* p, UserModelInputT* in, UserModelOutputT* out);
  *
- * 可选 #define MODEL_STEP_SIZE 0.001  定义内部定步长
+ * model_step 的 dt 由 importer 透传；FMU 不在内部切分
  * ============================================================ */
 
 #ifndef USER_MODEL_H_
@@ -196,14 +184,23 @@ def cmd_init(args: argparse.Namespace) -> int:
     guid = _load_guid(target_dir)
     xml = render_model_description(target_dir.name, guid, parsed)
     (build_dir / "modelDescription.xml").write_text(xml, encoding="utf-8")
+
+    # 生成 README.md 与 test/test_user_model.py（init 阶段即生成骨架）
+    generate_readme(parsed, target_dir.name, target_dir)
+    generate_test(parsed, target_dir.name, target_dir)
+
     print(f"[OK] 已生成 build/fmi2_adapter.c (骨架)")
     print(f"[OK] 已生成 build/modelDescription.xml")
+    print(f"[OK] 已生成 README.md")
+    print(f"[OK] 已生成 test/test_user_model.py")
 
     print(f"\n项目骨架生成完成: {target_dir}")
     print("下一步:")
     print("  1. 编辑 include/user_model.h: 给 3 个结构体添加字段")
     print("  2. 编辑 src/user_model.c: 实现 3 个回调")
-    print("  3. 运行 fmu-pack build 构建 FMU")
+    print("  3. 编辑 README.md 的「功能」段与变量表「说明」列")
+    print("  4. 编辑 test/test_user_model.py 的输入信号与断言")
+    print("  5. 运行 fmu-pack build 构建 FMU")
     return 0
 
 
@@ -224,8 +221,7 @@ def cmd_build(args: argparse.Namespace) -> int:
 
     model_identifier = project_dir.name
     print(f"[1/6] user_model.h 解析通过 (params={len(parsed.parameter_fields)}, "
-          f"inputs={len(parsed.input_fields)}, outputs={len(parsed.output_fields)}, "
-          f"step_size={parsed.model_step_size})")
+          f"inputs={len(parsed.input_fields)}, outputs={len(parsed.output_fields)})")
 
     # 2. 生成 fmi2_adapter.c
     build_dir = project_dir / "build"
@@ -239,6 +235,9 @@ def cmd_build(args: argparse.Namespace) -> int:
     xml_path = build_dir / "modelDescription.xml"
     xml_path.write_text(xml, encoding="utf-8")
     print(f"[3/6] build/modelDescription.xml 已生成")
+
+    # 注: README.md 与 test/test_user_model.py 仅在 init 阶段生成一次，
+    # 后续由用户自行维护。build 不再覆写。
 
     # 4. XSD 校验（可选）
     xsd_path = Path(args.xsd) if args.xsd else None

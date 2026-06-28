@@ -1,31 +1,37 @@
 /* ============================================================
- * user_model.h —— RC 低通滤波器
+ * user_model.h —— 用户模型接口
  *
- * 数学模型: dy/dt = (u - y) / tau
- *           y(0) = 0
- * 离散化:   y_{k+1} = y_k + dt * (u_k - y_k) / tau
+ * 三个固定结构体（causality 分组，工具按字段声明顺序分配 VR）:
+ *   UserModelParameterT —— 可读可写 (causality=parameter)
+ *   UserModelInputT     —— 可读可写 (causality=input)
+ *   UserModelOutputT    —— 只读     (causality=output)
+ *
+ * 三个回调（用户实现）:
+ *   int  model_init(UserModelParameterT* p, UserModelInputT* in, UserModelOutputT* out);
+ *   int  model_step(UserModelParameterT* p, UserModelInputT* in, UserModelOutputT* out,
+ *                   double t, double dt);
+ *   void model_terminate(UserModelParameterT* p, UserModelInputT* in, UserModelOutputT* out);
+ *
+ * model_step 的 dt 由 importer 透传；FMU 不在内部切分
  * ============================================================ */
 
 #ifndef USER_MODEL_H_
 #define USER_MODEL_H_
 
-/* 内部定步长（10ms） */
-#define MODEL_STEP_SIZE 0.01
-
-/* ---- 3 个固定结构体（causality 分组）---- */
+/* ---- 三个固定结构体（用户填充字段）---- */
 typedef struct {
-    double tau;   /* parameter: 时间常数 */
+    double tau;   /* 时间常数（秒） */
 } UserModelParameterT;
 
 typedef struct {
-    double u;     /* input: 输入信号 */
+    double u;     /* 输入信号 */
 } UserModelInputT;
 
 typedef struct {
-    double y;     /* output: 滤波后输出 */
+    double y;     /* 滤波后输出 */
 } UserModelOutputT;
 
-/* ---- 3 个回调 ---- */
+/* ---- 三个回调（用户实现，见 user_model.c）---- */
 int  model_init(UserModelParameterT* p, UserModelInputT* in, UserModelOutputT* out);
 int  model_step(UserModelParameterT* p, UserModelInputT* in, UserModelOutputT* out,
                 double t, double dt);

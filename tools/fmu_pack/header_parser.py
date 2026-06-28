@@ -32,7 +32,6 @@ class ParsedModel:
     has_init: bool = False
     has_step: bool = False
     has_terminate: bool = False
-    model_step_size: float = 0.001  # 默认 1ms
 
     def all_fields(self) -> list[FieldInfo]:
         return self.parameter_fields + self.input_fields + self.output_fields
@@ -89,11 +88,6 @@ _RE_INIT       = re.compile(r"\bint\s+model_init\s*\(")
 _RE_STEP       = re.compile(r"\bint\s+model_step\s*\(")
 _RE_TERMINATE  = re.compile(r"\bvoid\s+model_terminate\s*\(")
 
-# MODEL_STEP_SIZE 常量
-_RE_STEP_SIZE  = re.compile(
-    r"#define\s+MODEL_STEP_SIZE\s+([\d.]+)"
-)
-
 
 # ---- 解析函数 ----
 
@@ -131,7 +125,8 @@ def parse_user_model_h(path: Path) -> ParsedModel:
     提取:
       - 3 个固定结构体 (UserModelParameterT / UserModelInputT / UserModelOutputT) 的字段
       - 3 个回调的存在性
-      - MODEL_STEP_SIZE 常量
+
+    注: v2 起不再解析 MODEL_STEP_SIZE（FMU 不在内部切分 importer dt）。
 
     Raises:
       ParseError: 结构体缺失或字段格式异常
@@ -178,14 +173,6 @@ def parse_user_model_h(path: Path) -> ParsedModel:
         raise ParseError(
             f"user_model.h 缺少回调声明: {', '.join(missing_cb)}"
         )
-
-    # 3. 提取 MODEL_STEP_SIZE
-    m = _RE_STEP_SIZE.search(text)
-    if m:
-        try:
-            result.model_step_size = float(m.group(1))
-        except ValueError:
-            pass
 
     return result
 

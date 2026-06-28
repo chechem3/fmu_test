@@ -130,7 +130,6 @@ def render_model_description(
         guid=guid,
         generation_tool=generation_tool,
         generation_time=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        step_size=parsed.model_step_size,
         all_vars=all_vars,
         outputs_indices=outputs_indices,
         derivatives_indices=[],  # 暂不支持

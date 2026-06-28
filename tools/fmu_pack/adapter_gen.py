@@ -4,7 +4,7 @@
   - VR 枚举（按 user_model.h 字段声明顺序）
   - get/set 路由（Real/Integer/Boolean/String 全部类型）
   - 调用 model_init / model_step / model_terminate
-  - 内部定步长 MODEL_STEP_SIZE
+  - v2 起：FMU 不在内部切分 importer dt（由 importer 决定步长）
 """
 
 from pathlib import Path

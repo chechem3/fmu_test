@@ -14,11 +14,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ---- 内部步长（来自 user_model.h 的 MODEL_STEP_SIZE）---- */
-#ifndef MODEL_STEP_SIZE
-#define MODEL_STEP_SIZE 0.001
-#endif
-
 /* ---- 适配层内部状态机 ---- */
 typedef enum {
     STATE_INSTANTIATED,
@@ -416,7 +411,7 @@ fmi2Status fmi2SetString(fmi2Component c, const fmi2ValueReference vr[],
     return fmi2OK;
 }
 
-/* ---- doStep: 内部定步长 MODEL_STEP_SIZE ---- */
+/* ---- doStep: 把 importer 给的 dt 原样转给 model_step，不在 FMU 内切分 ---- */
 
 fmi2Status fmi2DoStep(fmi2Component c,
                        fmi2Real currentCommunicationPoint,
@@ -431,21 +426,15 @@ fmi2Status fmi2DoStep(fmi2Component c,
     }
     (void)noSetFMUStatePriorToCurrentPoint;
 
-    /* FMU 内部定步长：importer 报的 dt 切分为多个 MODEL_STEP_SIZE */
-    fmi2Real remaining = communicationStepSize;
-    fmi2Real t = currentCommunicationPoint;
-    while (remaining > 1e-12) {
-        fmi2Real dt = remaining < MODEL_STEP_SIZE ? remaining : MODEL_STEP_SIZE;
-        if (model_step(&inst->p, &inst->in, &inst->out, t, dt) != 0) {
-            log_msg(inst, fmi2Error, "logStatusError",
-                    "fmi2DoStep: 模型 step 返回错误");
-            return fmi2Error;
-        }
-        t += dt;
-        remaining -= dt;
+    /* FMU 不在内部切分 dt：把 importer 给的 dt 原样转给 model_step */
+    if (model_step(&inst->p, &inst->in, &inst->out,
+                   currentCommunicationPoint, communicationStepSize) != 0) {
+        log_msg(inst, fmi2Error, "logStatusError",
+                "fmi2DoStep: 模型 step 返回错误");
+        return fmi2Error;
     }
 
-    inst->t_current = t;
+    inst->t_current = currentCommunicationPoint + communicationStepSize;
 
     if (inst->callbacks.stepFinished) {
         inst->callbacks.stepFinished(

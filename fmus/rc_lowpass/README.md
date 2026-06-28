@@ -1,9 +1,11 @@
-# {{ model_identifier }}
+# rc_lowpass
 
 > FMI 2.0 Co-Simulation FMU，由 [fmu-pack](../../tools/fmu_pack/) 自动生成
 
-> 此文件由 `fmu-pack init` 生成一次后由用户自行维护；后续 `fmu-pack build` 不会覆写。
-> 如果改了 `user_model.h`（增删字段），需手动更新下方「变量表」和 `test/test_user_model.py`。
+<!-- ⚠️ 此文件由 fmu-pack 自动生成。
+     「功能」段和变量表「说明」列是用户编辑区域；
+     每次 `fmu-pack build` 会重新渲染整个文件，导致用户编辑丢失。
+     建议：用 git 跟踪修改，build 后 `git diff` 同步你的修改。 -->
 
 ## 功能
 
@@ -16,9 +18,9 @@
 
 | name | vr | type | causality | start | 说明 |
 |------|----|------|-----------|-------|------|
-{% for v in variables %}
-| `{{ v.name }}` | {{ v.vr }} | {{ v.type }} | {{ v.causality }}{% if v.variability %} ({{ v.variability }}){% endif %} | {{ v.start if v.start is defined and v.start is not none else "—" }} | <!-- TODO --> |
-{% endfor %}
+| `tau` | 1 | Real | parameter (fixed) | 0.0 | <!-- TODO --> |
+| `u` | 2 | Real | input | 0.0 | <!-- TODO --> |
+| `y` | 3 | Real | output | — | <!-- TODO --> |
 
 ## 构建
 
@@ -27,7 +29,7 @@
 fmu-pack build --xsd ../../third_party/fmi2/schema/fmi2ModelDescription.xsd
 ```
 
-产物：`dist/{{ model_identifier }}.fmu`
+产物：`dist/rc_lowpass.fmu`
 
 ## 测试
 
@@ -39,7 +41,7 @@ python test/test_user_model.py
 ## 项目结构
 
 ```
-{{ model_identifier }}/
+rc_lowpass/
 ├── CMakeLists.txt         # 构建配置（init 生成，可改）
 ├── README.md              # 本文件（init 生成，用户编辑）
 ├── include/
@@ -54,10 +56,10 @@ build/
 ├── fmi2_adapter.c         # 从 user_model.h 渲染
 ├── modelDescription.xml   # 从 user_model.h 渲染
 ├── .fmu-guid              # GUID 持久化
-└── <platform>/{{ model_identifier }}.dll  # 编译产物
+└── <platform>/rc_lowpass.dll  # 编译产物
 
 dist/
-└── {{ model_identifier }}.fmu  # 最终 FMU
+└── rc_lowpass.fmu  # 最终 FMU
 ```
 
 ## 使用说明
@@ -76,3 +78,4 @@ dist/
 - get/set 路由：Real / Integer / Boolean / String 全部类型
 - FMI 2.0 状态机：`instantiated → initMode → stepMode → terminated`
 - 30+ 个 FMI 2.0 导出函数（`fmi2Instantiate` / `fmi2DoStep` / `fmi2GetReal` ...）
+<!-- USER_EDITED_AT=1782617612 -->
