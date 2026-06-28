@@ -15,7 +15,7 @@ from typing import Any
 
 
 def build_platform(
-    config: dict[str, Any],
+    model_identifier: str,
     project_dir: Path,
     platform: str,
     build_dir: Path,
@@ -27,8 +27,8 @@ def build_platform(
       cmake --build <build_dir>/<platform>
 
     Args:
-        config: fmu.yaml 配置
-        project_dir: 项目根目录（fmu.yaml 和 CMakeLists.txt 所在目录）
+        model_identifier: FMU 名称（= DLL 基名）
+        project_dir: 项目根目录（含 CMakeLists.txt）
         platform: 目标平台 (win64/linux64/darwin64)
         build_dir: 构建输出根目录
 
@@ -37,9 +37,7 @@ def build_platform(
     """
     project_dir = project_dir.resolve()
     build_dir = build_dir.resolve()
-
-    fmi = config["fmi"]
-    mi = fmi["modelIdentifier"]
+    mi = model_identifier
 
     # 检查 CMakeLists.txt 是否存在
     cmake_lists = project_dir / "CMakeLists.txt"
@@ -108,7 +106,6 @@ def build_platform(
     if out_dll.exists():
         return out_dll
 
-    # 有时 CMake 把产物放在子目录
     for candidate in plat_build_dir.rglob(f"{mi}{suffix}"):
         return candidate
 

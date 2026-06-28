@@ -26,7 +26,8 @@ from typing import Any
 
 
 def assemble_fmu(
-    config: dict[str, Any],
+    model_identifier: str,
+    guid: str,
     binaries: dict[str, Path],
     xml_path: Path,
     project_dir: Path,
@@ -42,7 +43,8 @@ def assemble_fmu(
       5. 生成 SHA256 校验文件
 
     Args:
-        config: fmu.yaml 配置
+        model_identifier: FMU 名称（= 顶层目录名）
+        guid: FMU GUID（来自 build/.fmu-guid）
         binaries: {platform: dll_path} 各平台编译产物
         xml_path: modelDescription.xml 文件路径
         project_dir: 项目根目录（用于查找 resources/ documentation/）
@@ -51,8 +53,7 @@ def assemble_fmu(
     Returns:
         .fmu 文件路径，失败返回 None
     """
-    fmi = config["fmi"]
-    mi = fmi["modelIdentifier"]
+    mi = model_identifier
     fmu_name = f"{mi}.fmu"
     fmu_path = dist_dir / fmu_name
 

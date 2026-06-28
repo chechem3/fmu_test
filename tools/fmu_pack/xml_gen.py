@@ -1,37 +1,29 @@
-"""modelDescription.xml 模板渲染
+"""modelDescription.xml 渲染 —— 从 ParsedModel 生成
 
-使用 Jinja2 内联模板从 fmu.yaml 配置生成符合 FMI 2.0 规范的 modelDescription.xml。
-
-模板变量:
-  - fmi.version / fmi.kind / fmi.modelIdentifier / fmi.guid / fmi.generationTool
-  - variables: 变量列表（name, vr, type, causality, variability, start, unit）
-  - outputs: causality=output 的变量索引（用于 ModelStructure/Outputs）
-  - derivatives: 参与导数的变量索引（仅 ModelExchange）
-  - initial_unknowns: initial=approx 的变量索引
-  - generation_time: UTC 时间戳
-
-FMI 2.0 XML 不使用命名空间前缀，属性直接写在元素上。
+不再依赖 fmu.yaml；VR 按字段声明顺序自动分配。
 """
 
 from typing import Any
+from datetime import datetime, timezone
 
 from jinja2 import Environment, BaseLoader
 
-# Jinja2 内联模板 —— 避免外部文件依赖，所有模板逻辑集中在此
+from .header_parser import ParsedModel, FieldInfo
+
+
 XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 <fmiModelDescription
-  fmiVersion="{{ fmi.version }}"
-  modelName="{{ fmi.modelIdentifier }}"
-  guid="{{ fmi.guid }}"
-  generationTool="{{ fmi.generationTool }}"
+  fmiVersion="2.0"
+  modelName="{{ model_identifier }}"
+  guid="{{ guid }}"
+  generationTool="{{ generation_tool }}"
   generationDateAndTime="{{ generation_time }}"
   variableNamingConvention="flat"
   numberOfEventIndicators="0">
 
-  {% if fmi.kind == "CoSimulation" %}
   <CoSimulation
-    modelIdentifier="{{ fmi.modelIdentifier }}"
-    canHandleVariableCommunicationStepSize="true"
+    modelIdentifier="{{ model_identifier }}"
+    canHandleVariableCommunicationStepSize="false"
     canInterpolateInputs="true"
     maxOutputDerivativeOrder="0"
     canRunAsynchronuously="false"
@@ -40,123 +32,106 @@ XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
     canGetAndSetFMUstate="false"
     canSerializeFMUstate="false"
     providesDirectionalDerivative="false" />
-  {% elif fmi.kind == "ModelExchange" %}
-  <ModelExchange modelIdentifier="{{ fmi.modelIdentifier }}" />
-  {% endif %}
 
-  {% if variables %}
   <ModelVariables>
-  {% for v in variables %}
+{% for v in all_vars %}
     <ScalarVariable
       name="{{ v.name }}"
       valueReference="{{ v.vr }}"
-      {% if v.causality %}causality="{{ v.causality }}"{% endif %}
-      {% if v.variability %}variability="{{ v.variability }}"{% endif %}
-      {% if v.initial %}initial="{{ v.initial }}"{% endif %}>
-      {% if v.type == "Real" %}
-      <Real{% if v.start is defined and v.start is not none %} start="{{ v.start }}"{% endif %}{% if v.unit is defined %} unit="{{ v.unit }}"{% endif %} />
-      {% elif v.type == "Integer" %}
-      <Integer{% if v.start is defined and v.start is not none %} start="{{ v.start }}"{% endif %} />
-      {% elif v.type == "Boolean" %}
-      <Boolean{% if v.start is defined and v.start is not none %} start="{{ v.start }}"{% endif %} />
-      {% elif v.type == "String" %}
-      <String{% if v.start is defined and v.start is not none %} start="{{ v.start }}"{% endif %} />
-      {% endif %}
+      causality="{{ v.causality }}"
+{% if v.variability %}
+      variability="{{ v.variability }}"
+{% endif %}
+{% if v.start is defined and v.start is not none %}
+      description="start={{ v.start }}"
+{% endif %}>
+      <{{ v.fmi_type }}{% if v.start is defined and v.start is not none %} start="{{ v.start }}"{% endif %} />
     </ScalarVariable>
-  {% endfor %}
+{% endfor %}
   </ModelVariables>
-  {% endif %}
 
   <ModelStructure>
-    {% if outputs %}
     <Outputs>
-      {% for idx in outputs %}
+{% for idx in outputs_indices %}
       <Unknown index="{{ idx }}" />
-      {% endfor %}
+{% endfor %}
     </Outputs>
-    {% endif %}
-    {% if derivatives %}
+{% if derivatives_indices %}
     <Derivatives>
-      {% for idx in derivatives %}
+{% for idx in derivatives_indices %}
       <Unknown index="{{ idx }}" />
-      {% endfor %}
+{% endfor %}
     </Derivatives>
-    {% endif %}
-    {% if initial_unknowns %}
-    <InitialUnknowns>
-      {% for idx in initial_unknowns %}
-      <Unknown index="{{ idx }}" />
-      {% endfor %}
-    </InitialUnknowns>
-    {% endif %}
+{% endif %}
   </ModelStructure>
 
 </fmiModelDescription>
 """
 
-# 全局 Jinja2 环境，使用 BaseLoader 从字符串加载模板
+
 _env = Environment(loader=BaseLoader())
 
 
-def render_model_description(config: dict[str, Any]) -> str:
-    """从配置渲染 modelDescription.xml 字符串
+def _fmi_type_default(fmi_type: str, causality: str):
+    """返回该类型/因果的默认 start 值（字符串）"""
+    if causality == "output":
+        return None
+    if fmi_type in ("Real",):
+        return "0.0"
+    if fmi_type in ("Integer",):
+        return "0"
+    if fmi_type in ("Boolean",):
+        return "false"
+    if fmi_type in ("String",):
+        return ""
+    return None
 
-    计算 ModelStructure 索引:
-      - Outputs: 所有 causality=output 的变量（1-based 序号）
-      - Derivatives: causality=local 且标记了 derivative 的变量
-      - InitialUnknowns: initial=approx 的 output/local 变量
 
-    Args:
-        config: fmu.yaml 解析后的配置字典
-
-    Returns:
-        完整的 modelDescription.xml 字符串
-    """
-    from datetime import datetime, timezone
-
-    fmi = config["fmi"]
-    variables: list[dict] = config.get("variables", [])
-
-    # 计算 ModelStructure 索引（FMI 规范要求 1-based）
-    outputs: list[int] = []
-    derivatives: list[int] = []
-    initial_unknowns: list[int] = []
-
-    for i, v in enumerate(variables, start=1):
-        causality = v.get("causality", "local")
-        if causality == "output":
-            outputs.append(i)
-        if causality == "local" and v.get("derivative"):
-            derivatives.append(i)
-        if causality in ("output", "local") and v.get("initial") == "approx":
-            initial_unknowns.append(i)
-
-    # 默认 start 值: input/parameter 变量若无显式 start，默认为 0.0
-    # FMI 2.0 规范要求 input 必须有 start（importer 不驱动时用此值）
-    type_defaults = {
-        "Real": 0.0,
-        "Integer": 0,
-        "Boolean": 0,
-        "String": "",
+def _field_to_var(f: FieldInfo, vr: int):
+    """FieldInfo + VR → XML variable 字典"""
+    return {
+        "name": f.name,
+        "vr": vr,
+        "causality": f.causality,
+        "fmi_type": f.fmi_type,
+        "variability": "fixed" if f.causality == "parameter" else None,
+        "start": _fmi_type_default(f.fmi_type, f.causality),
     }
-    processed_vars: list[dict] = []
-    for v in variables:
-        v = dict(v)  # 复制避免污染原 config
-        vtype = v.get("type", "Real")
-        causality = v.get("causality", "local")
-        # input/parameter/calculatedParameter 需要 start
-        if causality in ("input", "parameter", "calculatedParameter") and "start" not in v:
-            v["start"] = type_defaults.get(vtype, 0.0)
-        # output 不能有 start（已在 config 校验中检查）
-        processed_vars.append(v)
 
-    template = _env.from_string(XML_TEMPLATE)
-    return template.render(
-        fmi=fmi,
-        variables=processed_vars,
-        outputs=outputs if outputs else None,
-        derivatives=derivatives if derivatives else None,
-        initial_unknowns=initial_unknowns if initial_unknowns else None,
-        # 生成时间使用 UTC，符合 FMI 规范要求
+
+def render_model_description(
+    model_identifier: str,
+    guid: str,
+    parsed: ParsedModel,
+    generation_tool: str = "fmu-pack 0.1.0",
+) -> str:
+    """从 ParsedModel 渲染 modelDescription.xml
+
+    VR 分配: UserModelParameterT 字段先（1..N），然后 UserModelInputT，最后 UserModelOutputT
+    """
+    all_vars = []
+    vr = 1
+    for f in parsed.parameter_fields:
+        all_vars.append(_field_to_var(f, vr))
+        vr += 1
+    for f in parsed.input_fields:
+        all_vars.append(_field_to_var(f, vr))
+        vr += 1
+    for f in parsed.output_fields:
+        all_vars.append(_field_to_var(f, vr))
+        vr += 1
+
+    # ModelStructure Outputs 索引（1-based，按 all_vars 顺序）
+    outputs_indices = [i + 1 for i, v in enumerate(all_vars) if v["causality"] == "output"]
+
+    tpl = _env.from_string(XML_TEMPLATE)
+    return tpl.render(
+        model_identifier=model_identifier,
+        guid=guid,
+        generation_tool=generation_tool,
         generation_time=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        step_size=parsed.model_step_size,
+        all_vars=all_vars,
+        outputs_indices=outputs_indices,
+        derivatives_indices=[],  # 暂不支持
     )

@@ -1,41 +1,29 @@
-/**
+/* ============================================================
  * user_model.c —— RC 低通滤波器实现
  *
- * 数学模型:
- *   dy/dt = (u - y) / tau
- *   y(0) = 0
- *
- * 离散化（欧拉法）:
- *   y_{k+1} = y_k + dt * (u_k - y_k) / tau
- *
- * 状态结构体 RcState 定义在 user_model.h
- * 路由层 (fmi2_router.h) cast void* 到 RcState*
- */
+ * 欧拉法: y_{k+1} = y_k + dt * (u_k - y_k) / tau
+ * ============================================================ */
 
 #include "user_model.h"
-#include <stdlib.h>
 
-void* model_init(void) {
-    RcState* s = (RcState*)malloc(sizeof(RcState));
-    if (!s) return NULL;
-    s->tau = 1.0;
-    s->u   = 0.0;
-    s->y   = 0.0;
-    return s;
-}
-
-int model_step(void* state, double t, double dt) {
-    (void)t;  /* 自治系统，不显式依赖 t */
-    if (!state) return -1;
-    if (dt <= 0.0) return 0;
-
-    RcState* s = (RcState*)state;
-    /* 欧拉前向: y += dt * (u - y) / tau */
-    double dydt = (s->u - s->y) / s->tau;
-    s->y += dt * dydt;
+int model_init(UserModelParameterT* p, UserModelInputT* in, UserModelOutputT* out) {
+    p->tau = 1.0;   /* 默认 1 秒时间常数 */
+    in->u  = 0.0;
+    out->y = 0.0;
     return 0;
 }
 
-void model_terminate(void* state) {
-    free(state);
+int model_step(UserModelParameterT* p, UserModelInputT* in, UserModelOutputT* out,
+               double t, double dt) {
+    (void)t;
+    if (dt <= 0.0) return 0;
+    if (p->tau <= 0.0) return -1;  /* 避免除零 */
+    /* 欧拉前向: y += dt * (u - y) / tau */
+    out->y += dt * (in->u - out->y) / p->tau;
+    return 0;
+}
+
+void model_terminate(UserModelParameterT* p, UserModelInputT* in, UserModelOutputT* out) {
+    (void)p; (void)in; (void)out;
+    /* 无动态分配，无需释放 */
 }

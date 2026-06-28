@@ -2,18 +2,22 @@
  * fmi2_adapter.c —— FMI 2.0 Co-Simulation 适配层
  * 由 fmu-pack 自动生成，勿手动编辑
  *
- * 设计: 适配层只持有 void* model_state，不感知具体状态结构。
- *       用户模型负责: model_init (malloc) / model_step / model_terminate (free)。
- *       因此所有 FMU 项目的 fmi2_adapter.c 字节级一致。
+ * 状态: 适配层持有 3 个 UserModel* 结构体（parameter/input/output）
+ * 用户只实现 model_init / model_step / model_terminate 三个回调
+ * get/set 路由由工具根据 user_model.h 自动生成
  * ============================================================ */
 
 #include "fmi2Functions.h"
-#include "fmi2_router.h"
 #include "user_model.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* ---- 内部步长（来自 user_model.h 的 MODEL_STEP_SIZE）---- */
+#ifndef MODEL_STEP_SIZE
+#define MODEL_STEP_SIZE 0.001
+#endif
 
 /* ---- 适配层内部状态机 ---- */
 typedef enum {
@@ -24,13 +28,17 @@ typedef enum {
 } FmuState;
 
 typedef struct {
-    void* model_state;             /* 用户模型状态（opaque，由 user_model.c 管理生命周期） */
-    FmuState state;                /* FMI 状态机 */
-    fmi2Real t_start;              /* 仿真起始时间 */
-    fmi2Real t_current;            /* 当前通信点时间 */
-    fmi2String instance_name;      /* 实例名 */
-    fmi2CallbackFunctions callbacks; /* importer 回调 */
-    fmi2Boolean logging_on;        /* 日志开关 */
+    /* 用户 3 个结构体（直接持有，不做 void* opaque） */
+    UserModelParameterT p;
+    UserModelInputT     in;
+    UserModelOutputT    out;
+
+    FmuState state;
+    fmi2Real t_start;
+    fmi2Real t_current;
+    fmi2String instance_name;
+    fmi2CallbackFunctions callbacks;
+    fmi2Boolean logging_on;
 } ModelInstance;
 
 /* ---- 日志辅助 ---- */
@@ -42,6 +50,21 @@ static void log_msg(ModelInstance* inst, fmi2Status status,
             inst->instance_name, status, category, msg);
     }
 }
+
+/* ---- VR 枚举（工具按 user_model.h 字段声明顺序生成）---- */
+typedef enum {
+{% for f in parameter_fields %}
+    VR_{{ f.name | upper }} = {{ loop.index }},  /* parameter */
+{% endfor %}
+{% for f in input_fields %}
+    VR_{{ f.name | upper }} = {{ n_param + loop.index }},  /* input */
+{% endfor %}
+{% for f in output_fields %}
+    VR_{{ f.name | upper }} = {{ n_param + n_input + loop.index }},  /* output */
+{% endfor %}
+    VR_COUNT = {{ n_param + n_input + n_output }}
+} ModelVR;
+
 
 /* ================================================================
  * FMI 2.0 公共函数声明（C 链接符号导出）
@@ -73,7 +96,7 @@ FMI2_Export fmi2SerializeFMUstateTYPE      fmi2SerializeFMUstate;
 FMI2_Export fmi2DeSerializeFMUstateTYPE    fmi2DeSerializeFMUstate;
 FMI2_Export fmi2GetDirectionalDerivativeTYPE fmi2GetDirectionalDerivative;
 
-/* ---- Co-Simulation 函数声明 ---- */
+/* ---- Co-Simulation ---- */
 FMI2_Export fmi2SetRealInputDerivativesTYPE  fmi2SetRealInputDerivatives;
 FMI2_Export fmi2GetRealOutputDerivativesTYPE fmi2GetRealOutputDerivatives;
 FMI2_Export fmi2DoStepTYPE     fmi2DoStep;
@@ -88,13 +111,8 @@ FMI2_Export fmi2GetStringStatusTYPE  fmi2GetStringStatus;
  * 实现
  * ================================================================ */
 
-const char* fmi2GetTypesPlatform(void) {
-    return fmi2TypesPlatform;
-}
-
-const char* fmi2GetVersion(void) {
-    return fmi2Version;
-}
+const char* fmi2GetTypesPlatform(void) { return fmi2TypesPlatform; }
+const char* fmi2GetVersion(void) { return fmi2Version; }
 
 fmi2Status fmi2SetDebugLogging(fmi2Component c, fmi2Boolean loggingOn,
                                 size_t nCategories, const fmi2String categories[]) {
@@ -134,9 +152,8 @@ fmi2Component fmi2Instantiate(fmi2String instanceName, fmi2Type fmuType,
         inst->callbacks = *functions;
     }
 
-    /* 调用用户模型 init 回调（用户在 model_init 中 malloc 状态） */
-    inst->model_state = model_init();
-    if (!inst->model_state) {
+    /* 调用用户 model_init：初始化 parameter / input / output */
+    if (model_init(&inst->p, &inst->in, &inst->out) != 0) {
         log_msg(inst, fmi2Error, "logStatusError",
                 "fmi2Instantiate: 模型初始化失败");
         free(inst);
@@ -150,11 +167,7 @@ fmi2Component fmi2Instantiate(fmi2String instanceName, fmi2Type fmuType,
 void fmi2FreeInstance(fmi2Component c) {
     ModelInstance* inst = (ModelInstance*)c;
     if (!inst) return;
-    /* 用户模型负责释放 model_state（model_terminate 中 free） */
-    if (inst->model_state) {
-        model_terminate(inst->model_state);
-        inst->model_state = NULL;
-    }
+    model_terminate(&inst->p, &inst->in, &inst->out);
     free(inst);
 }
 
@@ -164,16 +177,12 @@ fmi2Status fmi2SetupExperiment(fmi2Component c, fmi2Boolean toleranceDefined,
     ModelInstance* inst = (ModelInstance*)c;
     if (!inst) return fmi2Error;
     if (inst->state != STATE_INSTANTIATED) {
-        log_msg(inst, fmi2Error, "logStatusError",
-                "fmi2SetupExperiment: 状态错误");
+        log_msg(inst, fmi2Error, "logStatusError", "fmi2SetupExperiment: 状态错误");
         return fmi2Error;
     }
     inst->t_start = startTime;
     inst->t_current = startTime;
-    (void)toleranceDefined;
-    (void)tolerance;
-    (void)stopTimeDefined;
-    (void)stopTime;
+    (void)toleranceDefined; (void)tolerance; (void)stopTimeDefined; (void)stopTime;
     return fmi2OK;
 }
 
@@ -203,24 +212,38 @@ fmi2Status fmi2Terminate(fmi2Component c) {
 fmi2Status fmi2Reset(fmi2Component c) {
     ModelInstance* inst = (ModelInstance*)c;
     if (!inst) return fmi2Error;
-    /* 重置: terminate + 重新 init */
-    if (inst->model_state) {
-        model_terminate(inst->model_state);
-    }
-    inst->model_state = model_init();
+    /* 重置：terminate + 重新 init */
+    model_terminate(&inst->p, &inst->in, &inst->out);
+    model_init(&inst->p, &inst->in, &inst->out);
     inst->state = STATE_INSTANTIATED;
     inst->t_current = inst->t_start;
     return fmi2OK;
 }
 
-/* ---- get/set Real: 通过路由表分发 ---- */
+/* ---- getReal: Real 字段的路由 ---- */
 
 fmi2Status fmi2GetReal(fmi2Component c, const fmi2ValueReference vr[],
                         size_t nvr, fmi2Real value[]) {
     ModelInstance* inst = (ModelInstance*)c;
     if (!inst) return fmi2Error;
     if (inst->state == STATE_TERMINATED) return fmi2Error;
-    model_route_getReal(inst->model_state, vr, nvr, value);
+
+    for (size_t i = 0; i < nvr; i++) {
+        switch (vr[i]) {
+{% for f in real_fields %}
+{% if f.causality == "parameter" %}
+        case VR_{{ f.name | upper }}: value[i] = inst->p.{{ f.name }}; break;
+{% endif %}
+{% if f.causality == "input" %}
+        case VR_{{ f.name | upper }}: value[i] = inst->in.{{ f.name }}; break;
+{% endif %}
+{% if f.causality == "output" %}
+        case VR_{{ f.name | upper }}: value[i] = inst->out.{{ f.name }}; break;
+{% endif %}
+{% endfor %}
+        default: return fmi2Error;
+        }
+    }
     return fmi2OK;
 }
 
@@ -229,49 +252,232 @@ fmi2Status fmi2SetReal(fmi2Component c, const fmi2ValueReference vr[],
     ModelInstance* inst = (ModelInstance*)c;
     if (!inst) return fmi2Error;
     if (inst->state == STATE_TERMINATED) return fmi2Error;
-    model_route_setReal(inst->model_state, vr, nvr, value);
+
+    for (size_t i = 0; i < nvr; i++) {
+        switch (vr[i]) {
+{% for f in real_fields %}
+{% if f.causality == "parameter" %}
+        case VR_{{ f.name | upper }}: inst->p.{{ f.name }} = value[i]; break;
+{% endif %}
+{% if f.causality == "input" %}
+        case VR_{{ f.name | upper }}: inst->in.{{ f.name }} = value[i]; break;
+{% endif %}
+{% endfor %}
+        default: return fmi2Error;
+        }
+    }
     return fmi2OK;
 }
 
-/* ---- 未实现的 get/set (返回 fmi2Error) ---- */
+/* ---- getInteger / setInteger ---- */
 
 fmi2Status fmi2GetInteger(fmi2Component c, const fmi2ValueReference vr[],
                            size_t nvr, fmi2Integer value[]) {
-    (void)c; (void)vr; (void)nvr; (void)value;
-    return fmi2Error;
-}
+    ModelInstance* inst = (ModelInstance*)c;
+    if (!inst) return fmi2Error;
+    if (inst->state == STATE_TERMINATED) return fmi2Error;
 
-fmi2Status fmi2GetBoolean(fmi2Component c, const fmi2ValueReference vr[],
-                           size_t nvr, fmi2Boolean value[]) {
-    (void)c; (void)vr; (void)nvr; (void)value;
-    return fmi2Error;
-}
-
-fmi2Status fmi2GetString(fmi2Component c, const fmi2ValueReference vr[],
-                          size_t nvr, fmi2String value[]) {
-    (void)c; (void)vr; (void)nvr; (void)value;
-    return fmi2Error;
+    for (size_t i = 0; i < nvr; i++) {
+        switch (vr[i]) {
+{% for f in integer_fields %}
+{% if f.causality == "parameter" %}
+        case VR_{{ f.name | upper }}: value[i] = inst->p.{{ f.name }}; break;
+{% endif %}
+{% if f.causality == "input" %}
+        case VR_{{ f.name | upper }}: value[i] = inst->in.{{ f.name }}; break;
+{% endif %}
+{% if f.causality == "output" %}
+        case VR_{{ f.name | upper }}: value[i] = inst->out.{{ f.name }}; break;
+{% endif %}
+{% endfor %}
+        default: return fmi2Error;
+        }
+    }
+    return fmi2OK;
 }
 
 fmi2Status fmi2SetInteger(fmi2Component c, const fmi2ValueReference vr[],
                            size_t nvr, const fmi2Integer value[]) {
-    (void)c; (void)vr; (void)nvr; (void)value;
-    return fmi2Error;
+    ModelInstance* inst = (ModelInstance*)c;
+    if (!inst) return fmi2Error;
+    if (inst->state == STATE_TERMINATED) return fmi2Error;
+
+    for (size_t i = 0; i < nvr; i++) {
+        switch (vr[i]) {
+{% for f in integer_fields %}
+{% if f.causality == "parameter" %}
+        case VR_{{ f.name | upper }}: inst->p.{{ f.name }} = value[i]; break;
+{% endif %}
+{% if f.causality == "input" %}
+        case VR_{{ f.name | upper }}: inst->in.{{ f.name }} = value[i]; break;
+{% endif %}
+{% endfor %}
+        default: return fmi2Error;
+        }
+    }
+    return fmi2OK;
+}
+
+/* ---- getBoolean / setBoolean ---- */
+
+fmi2Status fmi2GetBoolean(fmi2Component c, const fmi2ValueReference vr[],
+                           size_t nvr, fmi2Boolean value[]) {
+    ModelInstance* inst = (ModelInstance*)c;
+    if (!inst) return fmi2Error;
+    if (inst->state == STATE_TERMINATED) return fmi2Error;
+
+    for (size_t i = 0; i < nvr; i++) {
+        switch (vr[i]) {
+{% for f in boolean_fields %}
+{% if f.causality == "parameter" %}
+        case VR_{{ f.name | upper }}: value[i] = inst->p.{{ f.name }}; break;
+{% endif %}
+{% if f.causality == "input" %}
+        case VR_{{ f.name | upper }}: value[i] = inst->in.{{ f.name }}; break;
+{% endif %}
+{% if f.causality == "output" %}
+        case VR_{{ f.name | upper }}: value[i] = inst->out.{{ f.name }}; break;
+{% endif %}
+{% endfor %}
+        default: return fmi2Error;
+        }
+    }
+    return fmi2OK;
 }
 
 fmi2Status fmi2SetBoolean(fmi2Component c, const fmi2ValueReference vr[],
                            size_t nvr, const fmi2Boolean value[]) {
-    (void)c; (void)vr; (void)nvr; (void)value;
-    return fmi2Error;
+    ModelInstance* inst = (ModelInstance*)c;
+    if (!inst) return fmi2Error;
+    if (inst->state == STATE_TERMINATED) return fmi2Error;
+
+    for (size_t i = 0; i < nvr; i++) {
+        switch (vr[i]) {
+{% for f in boolean_fields %}
+{% if f.causality == "parameter" %}
+        case VR_{{ f.name | upper }}: inst->p.{{ f.name }} = value[i]; break;
+{% endif %}
+{% if f.causality == "input" %}
+        case VR_{{ f.name | upper }}: inst->in.{{ f.name }} = value[i]; break;
+{% endif %}
+{% endfor %}
+        default: return fmi2Error;
+        }
+    }
+    return fmi2OK;
+}
+
+/* ---- getString / setString ---- */
+
+fmi2Status fmi2GetString(fmi2Component c, const fmi2ValueReference vr[],
+                          size_t nvr, fmi2String value[]) {
+    ModelInstance* inst = (ModelInstance*)c;
+    if (!inst) return fmi2Error;
+    if (inst->state == STATE_TERMINATED) return fmi2Error;
+
+    for (size_t i = 0; i < nvr; i++) {
+        switch (vr[i]) {
+{% for f in string_fields %}
+{% if f.causality == "parameter" %}
+        case VR_{{ f.name | upper }}: value[i] = inst->p.{{ f.name }}; break;
+{% endif %}
+{% if f.causality == "input" %}
+        case VR_{{ f.name | upper }}: value[i] = inst->in.{{ f.name }}; break;
+{% endif %}
+{% if f.causality == "output" %}
+        case VR_{{ f.name | upper }}: value[i] = inst->out.{{ f.name }}; break;
+{% endif %}
+{% endfor %}
+        default: return fmi2Error;
+        }
+    }
+    return fmi2OK;
 }
 
 fmi2Status fmi2SetString(fmi2Component c, const fmi2ValueReference vr[],
                           size_t nvr, const fmi2String value[]) {
-    (void)c; (void)vr; (void)nvr; (void)value;
+    ModelInstance* inst = (ModelInstance*)c;
+    if (!inst) return fmi2Error;
+    if (inst->state == STATE_TERMINATED) return fmi2Error;
+
+    for (size_t i = 0; i < nvr; i++) {
+        switch (vr[i]) {
+{% for f in string_fields %}
+{% if f.causality == "parameter" %}
+        case VR_{{ f.name | upper }}: strncpy(inst->p.{{ f.name }}, value[i], sizeof(inst->p.{{ f.name }}) - 1); inst->p.{{ f.name }}[sizeof(inst->p.{{ f.name }}) - 1] = '\0'; break;
+{% endif %}
+{% if f.causality == "input" %}
+        case VR_{{ f.name | upper }}: strncpy(inst->in.{{ f.name }}, value[i], sizeof(inst->in.{{ f.name }}) - 1); inst->in.{{ f.name }}[sizeof(inst->in.{{ f.name }}) - 1] = '\0'; break;
+{% endif %}
+{% endfor %}
+        default: return fmi2Error;
+        }
+    }
+    return fmi2OK;
+}
+
+/* ---- doStep: 内部定步长 MODEL_STEP_SIZE ---- */
+
+fmi2Status fmi2DoStep(fmi2Component c,
+                       fmi2Real currentCommunicationPoint,
+                       fmi2Real communicationStepSize,
+                       fmi2Boolean noSetFMUStatePriorToCurrentPoint) {
+    ModelInstance* inst = (ModelInstance*)c;
+    if (!inst) return fmi2Error;
+    if (inst->state != STATE_STEP_MODE) {
+        log_msg(inst, fmi2Error, "logStatusError",
+                "fmi2DoStep: 状态错误，需在 stepMode 状态调用");
+        return fmi2Error;
+    }
+    (void)noSetFMUStatePriorToCurrentPoint;
+
+    /* FMU 内部定步长：importer 报的 dt 切分为多个 MODEL_STEP_SIZE */
+    fmi2Real remaining = communicationStepSize;
+    fmi2Real t = currentCommunicationPoint;
+    while (remaining > 1e-12) {
+        fmi2Real dt = remaining < MODEL_STEP_SIZE ? remaining : MODEL_STEP_SIZE;
+        if (model_step(&inst->p, &inst->in, &inst->out, t, dt) != 0) {
+            log_msg(inst, fmi2Error, "logStatusError",
+                    "fmi2DoStep: 模型 step 返回错误");
+            return fmi2Error;
+        }
+        t += dt;
+        remaining -= dt;
+    }
+
+    inst->t_current = t;
+
+    if (inst->callbacks.stepFinished) {
+        inst->callbacks.stepFinished(
+            inst->callbacks.componentEnvironment, fmi2OK);
+    }
+    return fmi2OK;
+}
+
+fmi2Status fmi2CancelStep(fmi2Component c) {
+    (void)c;
+    return fmi2OK;
+}
+
+/* ---- 其余 FMI 2.0 函数：input derivatives, FMU state, status 等 ---- */
+
+fmi2Status fmi2SetRealInputDerivatives(fmi2Component c,
+                                        const fmi2ValueReference vr[],
+                                        size_t nvr,
+                                        const fmi2Integer order[],
+                                        const fmi2Real value[]) {
+    (void)c; (void)vr; (void)nvr; (void)order; (void)value;
     return fmi2Error;
 }
 
-/* ---- FMU state: 未实现 ---- */
+fmi2Status fmi2GetRealOutputDerivatives(fmi2Component c,
+                                         const fmi2ValueReference vr[],
+                                         size_t nvr,
+                                         const fmi2Integer order[],
+                                         fmi2Real value[]) {
+    (void)c; (void)vr; (void)nvr; (void)order; (void)value;
+    return fmi2Error;
+}
 
 fmi2Status fmi2GetFMUstate(fmi2Component c, fmi2FMUstate* FMUstate) {
     (void)c; (void)FMUstate;
@@ -288,8 +494,7 @@ fmi2Status fmi2FreeFMUstate(fmi2Component c, fmi2FMUstate* FMUstate) {
     return fmi2Error;
 }
 
-fmi2Status fmi2SerializedFMUstateSize(fmi2Component c, fmi2FMUstate FMUstate,
-                                       size_t* size) {
+fmi2Status fmi2SerializedFMUstateSize(fmi2Component c, fmi2FMUstate FMUstate, size_t* size) {
     (void)c; (void)FMUstate; (void)size;
     return fmi2Error;
 }
@@ -314,93 +519,28 @@ fmi2Status fmi2GetDirectionalDerivative(fmi2Component c,
                                          size_t nKnown,
                                          const fmi2Real dvKnown[],
                                          fmi2Real dvUnknown[]) {
-    (void)c;
-    (void)vUnknown_ref; (void)nUnknown;
-    (void)vKnown_ref; (void)nKnown;
-    (void)dvKnown; (void)dvUnknown;
+    (void)c; (void)vUnknown_ref; (void)nUnknown;
+    (void)vKnown_ref; (void)nKnown; (void)dvKnown; (void)dvUnknown;
     return fmi2Error;
 }
 
-/* ---- Co-Simulation ---- */
-
-fmi2Status fmi2SetRealInputDerivatives(fmi2Component c,
-                                        const fmi2ValueReference vr[],
-                                        size_t nvr,
-                                        const fmi2Integer order[],
-                                        const fmi2Real value[]) {
-    (void)c; (void)vr; (void)nvr; (void)order; (void)value;
-    return fmi2Error;
-}
-
-fmi2Status fmi2GetRealOutputDerivatives(fmi2Component c,
-                                         const fmi2ValueReference vr[],
-                                         size_t nvr,
-                                         const fmi2Integer order[],
-                                         fmi2Real value[]) {
-    (void)c; (void)vr; (void)nvr; (void)order; (void)value;
-    return fmi2Error;
-}
-
-fmi2Status fmi2DoStep(fmi2Component c,
-                       fmi2Real currentCommunicationPoint,
-                       fmi2Real communicationStepSize,
-                       fmi2Boolean noSetFMUStatePriorToCurrentPoint) {
-    ModelInstance* inst = (ModelInstance*)c;
-    if (!inst) return fmi2Error;
-    if (inst->state != STATE_STEP_MODE) {
-        log_msg(inst, fmi2Error, "logStatusError",
-                "fmi2DoStep: 状态错误，需在 stepMode 状态调用");
-        return fmi2Error;
-    }
-    (void)noSetFMUStatePriorToCurrentPoint;
-
-    /* 调用用户模型 step 回调 */
-    int ret = model_step(inst->model_state, currentCommunicationPoint, communicationStepSize);
-    if (ret != 0) {
-        log_msg(inst, fmi2Error, "logStatusError",
-                "fmi2DoStep: 模型 step 返回错误");
-        return fmi2Error;
-    }
-
-    inst->t_current = currentCommunicationPoint + communicationStepSize;
-
-    if (inst->callbacks.stepFinished) {
-        inst->callbacks.stepFinished(
-            inst->callbacks.componentEnvironment, fmi2OK);
-    }
-    return fmi2OK;
-}
-
-fmi2Status fmi2CancelStep(fmi2Component c) {
-    (void)c;
-    return fmi2OK;
-}
-
-/* ---- 状态查询 ---- */
-
-fmi2Status fmi2GetStatus(fmi2Component c, const fmi2StatusKind s,
-                          fmi2Status* value) {
+fmi2Status fmi2GetStatus(fmi2Component c, const fmi2StatusKind s, fmi2Status* value) {
     ModelInstance* inst = (ModelInstance*)c;
     if (!inst || !value) return fmi2Error;
     switch (s) {
     case fmi2DoStepStatus:
-        *value = (inst->state == STATE_STEP_MODE) ? fmi2OK : fmi2Error;
-        break;
+        *value = (inst->state == STATE_STEP_MODE) ? fmi2OK : fmi2Error; break;
     case fmi2PendingStatus:
-        *value = fmi2OK;
-        break;
+        *value = fmi2OK; break;
     case fmi2Terminated:
-        *value = (inst->state == STATE_TERMINATED) ? fmi2True : fmi2False;
-        break;
+        *value = (inst->state == STATE_TERMINATED) ? fmi2True : fmi2False; break;
     default:
-        *value = fmi2Error;
-        break;
+        *value = fmi2Error; break;
     }
     return fmi2OK;
 }
 
-fmi2Status fmi2GetRealStatus(fmi2Component c, const fmi2StatusKind s,
-                              fmi2Real* value) {
+fmi2Status fmi2GetRealStatus(fmi2Component c, const fmi2StatusKind s, fmi2Real* value) {
     ModelInstance* inst = (ModelInstance*)c;
     if (!inst || !value) return fmi2Error;
     if (s == fmi2LastSuccessfulTime) {
@@ -411,20 +551,17 @@ fmi2Status fmi2GetRealStatus(fmi2Component c, const fmi2StatusKind s,
     return fmi2Error;
 }
 
-fmi2Status fmi2GetIntegerStatus(fmi2Component c, const fmi2StatusKind s,
-                                 fmi2Integer* value) {
+fmi2Status fmi2GetIntegerStatus(fmi2Component c, const fmi2StatusKind s, fmi2Integer* value) {
     (void)c; (void)s; (void)value;
     return fmi2Error;
 }
 
-fmi2Status fmi2GetBooleanStatus(fmi2Component c, const fmi2StatusKind s,
-                                 fmi2Boolean* value) {
+fmi2Status fmi2GetBooleanStatus(fmi2Component c, const fmi2StatusKind s, fmi2Boolean* value) {
     (void)c; (void)s; (void)value;
     return fmi2Error;
 }
 
-fmi2Status fmi2GetStringStatus(fmi2Component c, const fmi2StatusKind s,
-                                fmi2String* value) {
+fmi2Status fmi2GetStringStatus(fmi2Component c, const fmi2StatusKind s, fmi2String* value) {
     (void)c; (void)s; (void)value;
     return fmi2Error;
 }
